@@ -1,0 +1,5 @@
+# pnpm 12 把「构建脚本放行清单」移到了这里。
+# esbuild 需要跑 postinstall 才能落地平台二进制，否则 pnpm install 会以
+# ERR_PNPM_IGNORED_BUILDS 退出（Windows / macOS 都适用）。
+allowBuilds:
+  esbuild: true
