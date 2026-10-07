@@ -48,6 +48,8 @@
 | 注册 `workspace` 槽位 | 零报错，界面永不渲染 | rc.3 已移除，用 `main` |
 | 裸 `slots.register({name})` | `slot "xxx" is not declared` | 必须 `slots.inject(name, () => register(...))` |
 | **组件塞进 `entry.component`** | **标签出现、内容空白、零报错** | **组件是 `register()` 的第二个位置参数** |
+| `client.inject` 漏 api-gateway | `cannot get property "remote" without inject` | 补 `@deepseek-ai/dsh-api-gateway`（remote 的提供方） |
+| `sidebar.panellist` 传完整界面 | 同一界面在主区和侧栏各画一遍 | 侧栏只传图标，且svg 带 `data-dsh-panel-entry` |
 
 最后一条最隐蔽：全仓 `grep "component:"` 在所有 dsh-client-ui 包里**零命中** ——
 这个字段根本不存在。宿主读`label` 画标签（所以标签能出来），但不看 `component`（所以内容空）。
@@ -155,7 +157,7 @@ dsh web
 ```bash
 pnpm install         # 依赖（见下方 pnpm 12 注意事项）
 pnpm run bundle      # 构建两个 half → lib/
-pnpm run gates       # 一致性门禁：合同/ 名称 / React external / Remote 契约（20 项）
+pnpm run gates       # 一致性门禁：合同 / 名称 / Remote 契约 / 插槽契约（23 项）
 pnpm run smoke       # 冒烟自检：真 cordis Context + Remote 控制器（97 项）
 pnpm run typecheck   # 类型检查
 pnpm run verify      # bundle + gates + smoke 一条龙
@@ -181,7 +183,7 @@ designer-desk/
 │   └── 设计方案.md          完整设计方案
 ├── scripts/
 │   ├── build.mjs           esbuild 双 half 打包 + ModuleLoader 包装
-│   ├── gates/run.mjs       一致性门禁（20 项）
+│   ├── gates/run.mjs       一致性门禁（23 项）
 │   └── smoke.mjs           冒烟自检（97 项，日期边界 + 第 2 期 + Remote 契约）
 └── src/
         ├── index.ts            Node half 入口（inject 并集 + effect 统一注册）
@@ -218,7 +220,7 @@ designer-desk/
 |---|---|
 | `pnpm run bundle` | ✅ lib/index.js 152.9 KB · lib/api.js 63.9 KB · lib/client.js 206.1 KB |
 | `pnpm run typecheck` | ✅ 0 error |
-| `pnpm run gates` | ✅ 20 / 20 |
+| `pnpm run gates` | ✅ 23 / 23 |
 | `pnpm run smoke` | ✅ 97 / 97 |
 
 ### 合同铁律

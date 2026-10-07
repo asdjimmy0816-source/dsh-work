@@ -201,6 +201,28 @@ check('package.json: 导出 ./api（控制器的独立入口）', () => {
   return 'lib/api.js'
 })
 
+check('package.json: client.inject 含 api-gateway（remote 服务的提供方）', () => {
+  const inject = pkg.dsh?.client?.inject ?? []
+  // ctx.remote 由 @deepseek-ai/dsh-api-gateway 提供
+  // （其 client.js 里 `super(ctx, "remote")`）。
+  // 漏了它 → `cannot get property "remote" without inject`，
+  // 界面渲染正常但所有数据请求失败。
+  assert(inject.includes('@deepseek-ai/dsh-api-gateway'),
+    'client.inject 缺 @deepseek-ai/dsh-api-gateway —— 拿不到 remote 服务，数据通道全断')
+  return 'api-gateway 已注入'
+})
+
+check('lib/client.js: 侧栏插槽传图标而非完整界面（避免重复渲染）', () => {
+  const src = libClient
+  // 侧栏面板会完整渲染传入的组件。传App 会让工作台在主区和侧栏各画一遍。
+  assert(!/sidebar\.panellist[\s\S]{0,200}?,\s*App\s*[,)]/.test(src),
+    'sidebar.panellist 仍在传 App —— 侧栏会把整个工作台再渲染一遍')
+  // 图标组件必须带 data-dsh-panel-entry，否则宿主点不动
+  assert(src.includes('data-dsh-panel-entry') || src.includes('dsh-panel-entry'),
+    'DeskIcon 缺 data-dsh-panel-entry —— 宿主靠它把点击路由到 main 面板')
+  return '侧栏传图标'
+})
+
 check('lib/client.js: ModuleLoader id 等于包名', () => {
   const m = libClient.match(/__ModuleLoader__\.load\(\s*\{\s*id:\s*["']([^"']+)["']/)
   assert(m, '未找到 __ModuleLoader__.load 包装')

@@ -34,6 +34,7 @@
 import { bindCtx } from './kit'
 import { App } from './App'
 import { Settings } from './Settings'
+import { DeskIcon } from './DeskIcon'
 
 type Ctx = any
 
@@ -95,8 +96,12 @@ export function apply(ctx: Ctx) {
   )
 
   /**
-   * 侧栏入口 —— 让工作台在侧栏可点开，而不只是 main 面板。
-   * 形态抄 `dsh-studio-dashboard` 的 `sidebar.panellist` 注册。
+   * 侧栏入口 —— 只放一个图标按钮，点开主工作台。
+   *
+   * ⚠️ 这里**绝不能传 App**：侧栏面板会完整渲染一遍组件，六 Tab 工作台
+   * 会在主区和侧栏各画一次（界面上表现为「同一界面出现两份」）。
+   * `dsh-studio-dashboard` 的做法是侧栏传图标组件（`DashIcon`），
+   * 完整界面只挂在 `main` 上。
    */
   register(
     'sidebar.panellist',
@@ -106,7 +111,7 @@ export function apply(ctx: Ctx) {
       order: 21,
       label: () => '设计台',
     },
-    App,
+    DeskIcon,
   )
 
   // 插件卸载时注销全部插槽
