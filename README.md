@@ -30,30 +30,33 @@
 
 ## 当前状态
 
-第1、2 期六个模块的业务逻辑、界面、门禁、冒烟全部通过，插件也装进了 DSH，
-客户端 bundle 确认加载，**运行零报错**。
+第 1、2 期六个模块的业务逻辑、界面、门禁、冒烟全部通过，插件已装进**桌面端 profile**
+（`~/.dsh/profiles/desktop`，bundles 第 24 项 + `link:` 软链）。
 
 通信层已从 HTTP 路由整体改为 **Typert Remote**（DSH rc.3 的实际机制）：
 `src/api.ts` 的 `DeskRemote` 控制器（32 个 `@Remote` 端点）+ client 侧
 `ctx.remote.$mount('designerDesk')`。
 
-**已知限制**：主界面挂在 `conversation.view` 插槽上，这是**会话内视图**——
-需要先在 DSH 里开一个会话，六Tab 工作区才会出现。在「新会话」空状态下看不到，
-这是宿主的设计，不是插件的故障。
-
-侧栏徽标暂未注册：`sidebar.footer.action` 在 rc.3 的渲染路径上会抛 React #130，
-错误边界只把该槽位换成空 div，净负收益。
-
-### rc.3 踩坑清单（都是静默失败，务必记住）
+### rc.3 插槽契约（踩了七次的静默失败）
 
 | 坑 | 症状 | 正解 |
 |---|---|---|
 | `inject: ['webServer']` | 所有路由 404 | rc.3 无 HTTP 路由，走 Typert Remote |
-| 控制器放在 `apply()` 里 `ctx.plugin()` | 客户端 `$mount()` 永远 waiting | 独立 Loader entry（`cordis.patch.yml` 第二条） |
+| 控制器写在业务 `apply()` 里 | `$mount()` 永远 waiting，无报错 | 独立 Loader entry，由Loader 在根层实例化 |
 | `super(ctx, 'designerDesk')` | 控制器覆盖业务服务，`getState` 变 undefined | serviceKey 与 namespace 分离 |
-| `package.json` 的 `client.inject: ['slots']` | `apply` 静默不执行 | 必须写全限定包名 `@deepseek-ai/dsh-client-ui-slots` |
-| 注册 `workspace` 槽位 | bundle 加载、零报错、界面永不渲染 | rc.3 已移除该槽位，用 `conversation.view` |
-|裸 `slots.register({name})` | `slot "xxx" is not declared` | 必须 `slots.inject(name, () => register(...))` |
+| `client.inject: ['slots']` | `apply` 静默不执行 | 必须写全限定包名 `@deepseek-ai/dsh-client-ui-slots` |
+| 注册 `workspace` 槽位 | 零报错，界面永不渲染 | rc.3 已移除，用 `main` |
+| 裸 `slots.register({name})` | `slot "xxx" is not declared` | 必须 `slots.inject(name, () => register(...))` |
+| **组件塞进 `entry.component`** | **标签出现、内容空白、零报错** | **组件是 `register()` 的第二个位置参数** |
+
+最后一条最隐蔽：全仓 `grep "component:"` 在所有 dsh-client-ui 包里**零命中** ——
+这个字段根本不存在。宿主读`label` 画标签（所以标签能出来），但不看 `component`（所以内容空）。
+症状和「Remote 通道不通」几乎无法区分。
+
+`conversation.view` 同样不能用：它是**会话消息流的声明式容器**，entry 靠
+`children` + `inject(sessionId)` 组视图树，宿主渲染的是它声明的子节点。
+整页自定义界面唯一正确的入口是 **`main`** —— 同 profile 的 `dsh-studio-dashboard`
+就用它渲染工作台。
 
 ---
 

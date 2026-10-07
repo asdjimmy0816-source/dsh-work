@@ -219,14 +219,31 @@ check('lib/client.js: React 保持 external 未被重复打包', () => {
 
 check('lib/client.js: 注册 rc.3 实际提供的插槽', () => {
   const src = libClient
-  // ⚠️ `workspace` 槽位在 rc.3 已被移除 —— 注册进去不报错但界面永不渲染（静默失败）。
-  // 词表来自 dsh-client-ui-* 实际 `slots.inject(...)` 的全量提取。
-  for (const slot of ['conversation.view', 'settings.section']) {
+  // ⚠️ 两个已失效的槽位（注册进去都不报错，但界面永不渲染）：
+  //   workspace          —— rc.3 已移除该槽位
+  //   conversation.view  —— 是「会话消息流的声明式容器」，entry 靠 children + inject
+  //                        组视图树，传组件会被忽略
+  // 整页自定义界面唯一正确的入口是 `main`（同 profile 的 dsh-studio-dashboard 就用它）。
+  for (const slot of ['main', 'settings.section', 'sidebar.panellist']) {
     assert(src.includes(`"${slot}"`) || src.includes(`'${slot}'`), `未注册插槽 ${slot}`)
   }
-  assert(!src.includes('"workspace"') && !src.includes("'workspace'"),
-    '仍在注册已失效的 workspace 槽位 —— 界面会静默不渲染')
-  return 'conversation.view / settings.section'
+  for (const dead of ['workspace', 'conversation.view']) {
+    assert(!src.includes(`"${dead}"`) && !src.includes(`'${dead}'`),
+      `仍在注册已失效的 ${dead} 槽位 —— 界面会静默不渲染`)
+  }
+  return 'main / settings.section / sidebar.panellist'
+})
+
+check('lib/client.js: 组件走 register() 第二参数（不是 entry.component）', () => {
+  const src = libClient
+  // ⚠️ rc.3 最隐蔽的坑：entry.component 会被宿主忽略 → 标签出现、内容空白、零报错。
+  // 正确形态是 slots.register(entry, Component)，见 dsh-studio-dashboard。
+  assert(!/component:\s*[A-Za-z]/.test(src),
+    '仍把组件塞进 entry.component —— 宿主不读该字段，界面会空白且无报错')
+  // register 的调用形态应带第二个参数
+  assert(/register\([a-zA-Z_$][\w$]*,\s*[A-Za-z]/.test(src) || /slots\.inject/.test(src),
+    '未见 slots.inject(...) 或 register(entry, Component) 形态')
+  return 'register(entry, Component)'
 })
 
 check('lib/client.js: 插槽经 slots.inject 声明（不是裸 register）', () => {

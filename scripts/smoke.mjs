@@ -456,19 +456,29 @@ assert('第 9 阶段没有下一步（结项收尾）', stageDef(9).next === nul
   assert('client 导出 apply 函数', typeof clientExports?.apply === 'function')
 
   // 正常路径：注册三个插槽
-  // ⚠️ 假slots 必须同时提供 inject() 与 register() ——
-  // 真实宿主里必须用 slots.inject(name, () => register(...)) 声明插槽，
-  // 直接 register 会被拒：`slot "xxx" is not declared`。
+  // ⚠️ 假 slots 必须实现 inject() / register()，且 register 的**第二参数**是组件。
+  // 真实契约：`slots.inject(slot, () => slots.register(entry, Component))`
+  // —— 组件不是 entry 的字段。这一点错的话，宿主会渲染出空白但零报错。
   const registered = []
   const injected = []
+  const rendered = []
+  const labelIssues = []
+  const seenIds = new Set()
   const makeSlots = () => ({
     inject: (name, cb) => {
       injected.push(name)
       const dispose = cb()
       return typeof dispose === 'function' ? dispose : () => {}
     },
-    register: (def) => {
-      registered.push(def.name)
+    register: (entry, Comp) => {
+      // 若把组件塞进 entry.component，说明用的是旧（错误）契约
+      if (entry && entry.component) rendered.push(`BAD:${entry.component.name ?? 'anon'}`)
+      rendered.push(`${entry.name}:${Comp ? (Comp.name ?? 'anon') : 'NO_COMPONENT'}`)
+      // label 是字符串而非函数 → 宿主渲染不出文字，也是一种静默失效
+      if (entry && typeof entry.label !== 'function') labelIssues.push(`${entry.name} 不是函数`)
+      if (entry && entry.id && seenIds.has(entry.id)) labelIssues.push(`id 冲突: ${entry.id}`)
+      if (entry && entry.id) seenIds.add(entry.id)
+      registered.push(entry.name)
       return () => {}
     },
   })
@@ -477,19 +487,35 @@ assert('第 9 阶段没有下一步（结项收尾）', stageDef(9).next === nul
     logger: { warn: () => {}, error: () => {}, info: () => {} },
     slots: makeSlots(),
   })
-  assert('插槽都经由 slots.inject 声明（不是裸 register）',
+
+  assert('插槽都经由 slots.inject 声明（不是裸register）',
     injected.length === registered.length && injected.every((n) => registered.includes(n)),
     `inject=${injected.join(',')} register=${registered.join(',')}`)
-  assert('注册了 2 个插槽', registered.length === 2, JSON.stringify(registered))
-  // ⚠️ 插槽名必须与宿主 rc.3 实际消费的一致。旧文档里的 `workspace` 已被移除 ——
-  // 注册进去 bundle 能加载、apply 能跑、无报错，但界面永远不渲染（静默失败，最难查）。
-  assert('插槽名是 rc.3 实际提供的两个',
-    registered.join(',') === 'conversation.view,settings.section',
-    registered.join(','))
-  assert('不注册会抛 React #130 的 sidebar.footer.action', !registered.includes('sidebar.footer.action'),
-    `仍注册了：${registered.filter((x) => x === 'sidebar.footer.action').join(',')}`)
-  assert('不再注册已失效的 workspace 槽位', !registered.includes('workspace'),
-    `仍注册了：${registered.filter((r) => r === 'workspace').join(',')}`)
+
+  // 回归：组件必须走第二参数。传成 entry.component 是 rc.3 最隐蔽的坑 ——
+  // 标签正常显示但内容空白，零控制台报错。
+  assert('组件作为 register() 第二参数传入（不是 entry.component 字段）',
+    !rendered.some((r) => r.startsWith('BAD:')) && rendered.every((r) => !r.endsWith(':NO_COMPONENT')),
+    rendered.join(' | '))
+
+  assert('注册了 3 个插槽', registered.length === 3, JSON.stringify(registered))
+
+  assert('主界面挂在 main 插槽（整页容器）',
+    registered.includes('main'),
+    `实际：${registered.join(',')}`)
+  assert('不再注册 conversation.view（会话消息流容器，传组件会被忽略）',
+    !registered.includes('conversation.view'),
+    `仍注册了：${registered.join(',')}`)
+  assert('不再注册 rc.3 已移除的 workspace 槽位', !registered.includes('workspace'),
+    `仍注册了：${registered.join(',')}`)
+
+  // label 是字符串而非函数 → 宿主渲染不出文字；id 冲突 → 后注册的覆盖先注册的
+  assert('所有 entry 的 label 都是函数（字符串在 rc.3 不生效）',
+    labelIssues.filter((x) => x.includes('不是函数')).length === 0,
+    labelIssues.join(', '))
+  assert('entry id 全局唯一（冲突会静默覆盖）',
+    labelIssues.filter((x) => x.startsWith('id 冲突')).length === 0,
+    labelIssues.join(', '))
 
   // 降级路径：宿主没有 slots 服务时不能抛异常
   let degradedOk = true
