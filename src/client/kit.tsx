@@ -54,21 +54,47 @@ function buildContribution(): { package: string; descriptors: any[] } {
   const methods = Object.values(ENDPOINTS)
   return {
     package: PLUGIN_NAME,
-    descriptors: methods.map((method) => ({
-      id: `${PLUGIN_NAME}#${REMOTE_NAMESPACE}/${method}`,
-      // service 是**控制器注册的 cordis 服务键**，不是命名空间
-      service: CONTROLLER_SERVICE_KEY,
-      namespace: REMOTE_NAMESPACE,
-      method,
-      invocation: { kind: 'direct' },
-      // 无参数端点（GET）给空 parameters，有参数端点（POST）给一个 json 参数
-      parameters: NO_ARG_METHODS.has(method)
-        ? []
-        : [{ name: 'payload', wire: 'payload', source: 'json' }],
-      result: { mode: 'strict' },
-    })),
+    descriptors: methods.map((method) => {
+      const descriptor: any = {
+        id: `${PLUGIN_NAME}#${REMOTE_NAMESPACE}/${method}`,
+        // service 是**控制器注册的 cordis 服务键**，不是命名空间
+        service: CONTROLLER_SERVICE_KEY,
+        namespace: REMOTE_NAMESPACE,
+        method,
+        invocation: { kind: 'direct' },
+        parameters: [],
+      }
+      // ⚠️ `mode` 在 **parameters[].codec** 里，不在 result 里。
+      // requireStrictCodec 读的是 `codec.mode`，若只给 result 标mode，
+      // codec 会是 undefined → 抛 `Cannot read properties of undefined (reading 'mode')`。
+      // 且 codec 里的 schema 必须真有 .parse()（parseInput 会调它）。
+      if (!NO_ARG_METHODS.has(method)) {
+        descriptor.parameters = [
+          {
+            name: 'payload',
+            wire: 'payload',
+            source: 'json',
+            codec: { mode: 'strict', schema: JSON_VALUE_SCHEMA },
+          },
+        ]
+      }
+      return descriptor
+    }),
   }
 }
+
+/**
+ * 宽松 JSON schema —— 本插件的端点收发的是原始对象，不做形状校验。
+ *
+ * ⚠️ 必须自己实现 `.parse()`：parseInput 会直接调 `codec.schema.parse(value)`，
+ * 传非函数会抛 `codec.schema.parse is not a function`。
+ * 之所以不用 zod：本插件不需要运行时校验器，多引一个依赖不值；
+ * 真实类型约束在 TypeScript 侧（api.ts 的方法签名）已经有一层。
+ */
+const JSON_VALUE_SCHEMA = {
+  parse: (value: unknown) => value,
+}
+
 
 let remoteNs: any = null
 let mountState: MountState = 'waiting'

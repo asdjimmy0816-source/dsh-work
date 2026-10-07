@@ -260,6 +260,31 @@ check('lib/client.js: $mount 传 contribution 对象而非字符串', () => {
   return 'contribution 对象'
 })
 
+check('src/client/kit.tsx: descriptor 满足 requireStrictCodec 契约', () => {
+  // 复刻 dsh-api-gateway 的 requireStrictCodec：
+  //   对每个 parameter 读 `codec.mode`，不为 'strict' 就抛错。
+  //   之后 parseInput 会调 `codec.schema.parse(value)`。
+  //
+  // ⚠️ 踩过的坑：`mode` 写在 `result` 里而不是 `parameters[].codec` 里 →
+  //   codec 为 undefined → `Cannot read properties of undefined (reading 'mode')`。
+  //   schema 传非函数 → `codec.schema.parse is not a function`。
+  const src = readFileSync(path.join(root, 'src/client/kit.tsx'), 'utf8')
+  assert(/codec:\s*\{\s*mode:\s*'strict'/.test(src),
+    '未找到 parameters[].codec = { mode: "strict" } —— mode 必须在 codec 里，不是 result')
+  assert(/schema:\s*JSON_VALUE_SCHEMA/.test(src),
+    'codec 未挂 schema —— parseInput 会调 codec.schema.parse()')
+  assert(/JSON_VALUE_SCHEMA\s*=\s*\{[\s\S]*?parse:\s*\(/.test(src),
+    'JSON_VALUE_SCHEMA 必须自带 parse() 实现')
+  // 只看代码行（去掉行首注释再匹配），否则注释里的示例文字会造成误报
+  const codeOnly = src
+    .split('\n')
+    .filter((l) => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*') && !l.trimStart().startsWith('/*'))
+    .join('\n')
+  assert(!/result:\s*\{\s*mode/.test(codeOnly),
+    '仍把 mode 写在 result 里 —— requireStrictCodec 读的是 parameters[].codec.mode')
+  return 'codec.mode + schema.parse'
+})
+
 check('src/client/kit.tsx: ENDPOINTS 与 api.ts 的 @Remote 方法不漂移', () => {
   const kitSrc = readFileSync(path.join(root, 'src/client/kit.tsx'), 'utf8')
   const apiSrc = readFileSync(path.join(root, 'src/api.ts'), 'utf8')
