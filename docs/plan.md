@@ -109,11 +109,14 @@
 
 | 期次 | 新增模块 | 状态 |
 |---|---|---|
-| 第 1 期 | M1 项目管线 + M2 今日作战台 + M3 效果图工坊 | ✅ 已完成并通过本地验证 |
-| 第 2 期 | M4 工地巡检 + M5 材料进场 + M6 灵感素材库 | ✅ 已完成并通过本地验证 |
+| 第 1 期 | M1 项目管线 + M2 今日作战台 + M3 效果图工坊 | ✅ 已实现，本地验证通过 |
+| 第 2 期 | M4 工地巡检 + M5 材料进场 + M6 灵感素材库 | ✅ 已实现，本地验证通过 |
 | 第 3 期 | M7 报价与合同 + M8 选材库 | 待启动 |
 | 第 4 期 | M9 汇报 PPT 助手 + M10 公众号日更台 | 待启动 |
 | 第 5 期 | M11 小说写作台 + M12 数字生活角 | 待启动 |
+
+> ⚠️ **第 1、2 期标注的是「本地验证通过」，不是「真机可用」。** 真机冒烟（2026-10-07）发现通信层设计不匹配，
+> 见文末「真机安装验证」一节 —— Node half 的 31 条 HTTP 路由在真 DSH 下不会被调用，需重写为 Typert Remote。
 
 > 数据表 11 张已在第 1 期一次性定义（`sites` / `materials` / `refimages` / `quotes` / `contracts` / `contents` / `reading` 先留空数组），
 > 后续期次直接往表里填业务，**不需要数据迁移，也不会丢已有数据**。
@@ -166,3 +169,72 @@ allowBuilds:
 
 - 用户在 Mac mini M4 上启动 ComfyUI 后，到设置面板填工作流路径与节点映射（必须是 **API 格式** JSON）
 - 安装冒烟（阶段 ⑤）通过后，可初始化 git 仓库并发布
+
+
+## 真机安装验证（2026-10-07 19:00）
+
+插件已装进 `~/.dsh/profiles/web`，客户端 bundle 确认加载成功，但**Node half 的通信层需要重写**。
+
+### 已确认正常的部分
+
+- `dsh plugin --profile web add <路径>` 会自动把插件写进 profile 的 `dependencies` **和** `bundles`，不用手动改
+- profile 里是符号链接指向源码目录，`lib/` 产物跟着走，改源码后重新 bundle 即可
+- 浏览器 `window.__DSH_BOOT__.entries` 里能看到 `designer-desk/client.js`，与官方插件并排 —— **插件树加载成功**
+- 修好 dsh 全局安装后，启动日志里不再有 `plugin tree failed to load`
+
+### 必须重写：通信层
+
+**现象**：所有 `/api/designer-desk/*` 与 `/designer-desk/*` 全部 404，连官方服务的路径也 404。
+
+**根因**：DSH rc.3 的通信层是 **Typert Remote + WebSocket RPC**（`dsh-api-gateway` / `dsh-typert-protocol` /
+`dsh-client-connection`）—— 浏览器端通过 `Connection` 做一元调用，流式走 Gateway 的 WebSocket mux。
+**没有「HTTP 路由」这个机制。**
+
+现在的实现（`routes.ts` 31 条 `router.get/post` + `kit.tsx` 的 `fetch('/designer-desk/...')`）在这个宿主下一次都不会被调用。
+
+相关细节：
+
+- `webServer` 服务由 `@deepseek-ai/dsh-host-webserver` 提供，其类型定义注释写明「Electron 用 file:// + IPC，此包从不打印 URL」
+- `inject: ['webServer']` 在某些宿主下可能满足不了 → `apply` 根本不执行。此时 `safe()` 只在日志留一行 error，
+  极易被忽略（已用假 ctx 实测复现：`Cannot read properties of undefined (reading 'register')`）
+- 所以**必须有一条「apply 到底跑没跑」的硬断言**，不能只看启动日志有没有报错
+
+### 重写范围
+
+| 文件 | 现状 | 需要 |
+|---|---|---|
+| `src/routes.ts` | 31 条 `router.get/post` | 改成 Typert Remote 声明式接口 |
+| `src/client/kit.ts#api()` | `fetch('/designer-desk/...')` | 改走 `Connection` 一元调用 |
+| `scripts/smoke.mjs` | 假 ctx + 假 router 验证 31 条路由 | 改成 mock Typert Remote，验证 remote 方法而非 HTTP 路径 |
+
+**在重写完成前，本项目只能算「本地逻辑验证通过」，界面在真 DSH 里点不动。**
+
+### dsh 全局安装的坑（已修）
+
+真机冒烟前 `dsh` 根本起不来，报 `plugin tree failed to load: @deepseek-ai/dsh-sandbox-local`。
+根因：CLI 是 `0.1.5-rc.2`，但 `dsh-base` / `dsh-web-app` 已被更新到 `0.1.5-rc.3`，而 rc.3 的 34 个依赖从未装上
+（半途而废的更新）。与本插件无关 —— 把插件从 bundles 移除后同样报错。
+
+修法：`npm i -g @deepseek-ai/dsh@0.1.5-rc.3` 对齐版本。
+
+**注意**：不要试图在 dsh 安装目录里跑 `npm install` —— 它自己的 `package.json` 依赖一个从未发布到 registry 的包
+（`@deepseek-ai/dsh-experimental-code-runtime-python`），任何 npm install 都会 404。
+
+### 真机验证手段（可复用）
+
+curl 打不通（认证是浏览器 303 跳转 + cookie 流程）。必须用真实浏览器：
+
+```js
+chromium.launch({ executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true })
+await page.goto(`http://127.0.0.1:${PORT}/?token=${TOKEN}`)  // 浏览器自动跟 303 并落 cookie
+```
+
+**探测插件是否真加载：读 `window.__DSH_BOOT__.entries`，比看启动日志可靠得多。**
+
+其他坑：
+
+- 正确语法是 `dsh --profile web`，不是 `dsh web --profile web`（后者报 `unknown option '--profile'`）
+- `~/.dsh/profiles/node_modules.lock` 会锁住整个 profiles 目录；命令超时被杀会留下陈旧锁（内含已死 PID），
+  后续启动报 `atomic-write: timed out waiting for the writer lock`。删锁前务必确认锁里 PID 已死
+- 后台常驻要用执行器的 run_in_background，`nohup` 会随命令结束被回收，macOS 无 `setsid`
+- 桌面版（DeepSeek Harness.app）自带一套 dsh（在 `app.asar/dsh`），跑 `~/.dsh/profiles/desktop`，与全局 npm 那套是两套东西

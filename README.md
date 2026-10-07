@@ -28,6 +28,23 @@
 
 ---
 
+## ⚠️ 当前状态：本地逻辑验证通过，真机通信层待重写
+
+第1、2 期六个模块的业务逻辑、界面、门禁、冒烟全部通过，插件也能装进 DSH 并加载成功（浏览器
+`window.__DSH_BOOT__.entries` 里能看到 `designer-desk/client.js`）。
+
+**但 Node half 的 31 条 HTTP 路由在真 DSH 下不会被调用。** DSH rc.3 的通信层是
+**Typert Remote + WebSocket RPC**（`dsh-api-gateway` / `dsh-typert-protocol` / `dsh-client-connection`），
+浏览器端通过 `Connection` 做一元调用，**没有「HTTP 路由」这个机制**。本项目目前用的是
+`ctx.webServer.register(router => router.get(...))` + 前端 `fetch()`，与真实传输层不匹配。
+
+影响：界面能加载出框架，但所有数据请求 404，**界面点不动**。
+
+需要重写：`src/routes.ts`（→ Typert Remote 声明式接口）、`src/client/kit.ts#api()`（→ `Connection` 一元调用）、
+`scripts/smoke.mjs`（→ mock Remote 而非假 router）。详见 [docs/plan.md](docs/plan.md) 的「真机安装验证」一节。
+
+---
+
 ## 安装
 
 ### 方式一：本地目录（开发调试推荐）
