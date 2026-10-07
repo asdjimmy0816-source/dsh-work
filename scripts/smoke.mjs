@@ -452,7 +452,16 @@ assert('第 9 阶段没有下一步（结项收尾）', stageDef(9).next === nul
   })
 
   assert('client 导出 inject', Array.isArray(clientExports?.inject), JSON.stringify(clientExports?.inject))
-  assert('client 只注入 slots', JSON.stringify(clientExports.inject) === '["slots"]', JSON.stringify(clientExports.inject))
+  // ⚠️ 这里是**服务键名**，不是包名 —— 与 package.json 的 dsh.client.inject
+  //（包名，决定宿主加载哪些 bundle）是两套东西。
+  // cordis 严格注入：漏了 'remote' →读 ctx.remote 抛
+  // `cannot get property "remote" without inject`，界面渲染正常但数据全断。
+  assert('client inject 含 slots 与 remote 两个服务键',
+    clientExports.inject.includes('slots') && clientExports.inject.includes('remote'),
+    `实际：${JSON.stringify(clientExports.inject)}`)
+  assert('client inject 不含包名（全限定@ 开头的是包名，不该出现在这里）',
+    !clientExports.inject.some((n) => String(n).startsWith('@')),
+    `混入了包名：${JSON.stringify(clientExports.inject)}`)
   assert('client 导出 apply 函数', typeof clientExports?.apply === 'function')
 
   // 正常路径：注册三个插槽
