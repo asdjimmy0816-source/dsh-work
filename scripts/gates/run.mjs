@@ -243,6 +243,36 @@ check('package.json: client.inject 含 api-gateway（remote 服务的提供方�
   return 'api-gateway 已注入'
 })
 
+check('lib/client.js: $mount 传 contribution 对象而非字符串', () => {
+  const src = libClient
+  // ⚠️⚠️ rc.3 最隐蔽的坑：`remote.$mount()` **不接受字符串**。
+  // 它要 `{ package, descriptors: [...] }`，descriptors 是每个 RPC 方法一条的
+  // 调用契约（id/service/namespace/method/parameters/result）。
+  // 传字符串 → validateContribution 抛错 → 命名空间装不上 →
+  // 界面渲染正常但数据永远是 0，且错误只在 await 时出现一次。
+  assert(!/\$mount\(\s*REMOTE_NAMESPACE\s*\)/.test(src),
+    '$mount 仍在传字符串 —— 必须传 { package, descriptors } contribution 对象')
+  assert(src.includes('buildContribution') || src.includes('descriptors'),
+    '未找到 contribution 构造逻辑')
+  // descriptor 的 service 必须是控制器的 cordis 服务键，不能是命名空间
+  assert(src.includes('designerDeskController'),
+    'descriptor 的 service 应为控制器服务键 designerDeskController（与 api.ts 的 CONTROLLER_KEY 一致）')
+  return 'contribution 对象'
+})
+
+check('src/client/kit.tsx: ENDPOINTS 与 api.ts 的 @Remote 方法不漂移', () => {
+  const kitSrc = readFileSync(path.join(root, 'src/client/kit.tsx'), 'utf8')
+  const apiSrc = readFileSync(path.join(root, 'src/api.ts'), 'utf8')
+  const tbl = [...kitSrc.matchAll(/:\s*'([A-Za-z][A-Za-z0-9]*)',?\s*$/gm)].map((m) => m[1])
+  const remote = [...apiSrc.matchAll(/@Remote\s+(?:async\s+)?([a-zA-Z][A-Za-z0-9]*)/g)].map((m) => m[1])
+  const tblSet = new Set(tbl)
+  const remoteSet = new Set(remote)
+  const missing = [...remoteSet].filter((m) => !tblSet.has(m))
+  assert(missing.length === 0,
+    `控制器有但ENDPOINTS 没映射：${missing.join(', ')} —— 这些方法在界面上永远调不到`)
+  return `${remoteSet.size} 个方法全部有映射`
+})
+
 check('lib/client.js: 侧栏插槽传图标而非完整界面（避免重复渲染）', () => {
   const src = libClient
   // 侧栏面板会完整渲染传入的组件。传App 会让工作台在主区和侧栏各画一遍。

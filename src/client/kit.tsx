@@ -38,6 +38,38 @@ export const REMOTE_NAMESPACE = 'designerDesk'
 /** 挂载状态：waiting / ready / failed / unsupported */
 type MountState = 'waiting' | 'ready' | 'failed' | 'unsupported'
 
+/**
+ * Remote contribution —— `$mount()` 的参数。
+ *
+ * ⚠️⚠️ 这是 rc.3 最隐蔽的一个坑：`remote.$mount()` **不接受字符串**。
+ * 它要的是 `{ package, descriptors: [...] }`，descriptors 是**每个 RPC 方法一条**
+ * 的调用契约清单（id / service / namespace / method / parameters / result）。
+ * 传字符串会让 `validateContribution` 直接抛错，命名空间永远装不上，
+ * 表现是「界面渲染正常、数据永远是 0」。
+ *
+ * 官方写法见 `@dsh-multi-agent/plugin` 的 `TYPERT_REMOTE` 常量。
+ * 这里从 ENDPOINTS 表自动生成，避免两处漂移。
+ */
+function buildContribution(): { package: string; descriptors: any[] } {
+  const methods = Object.values(ENDPOINTS)
+  return {
+    package: PLUGIN_NAME,
+    descriptors: methods.map((method) => ({
+      id: `${PLUGIN_NAME}#${REMOTE_NAMESPACE}/${method}`,
+      // service 是**控制器注册的 cordis 服务键**，不是命名空间
+      service: CONTROLLER_SERVICE_KEY,
+      namespace: REMOTE_NAMESPACE,
+      method,
+      invocation: { kind: 'direct' },
+      // 无参数端点（GET）给空 parameters，有参数端点（POST）给一个 json 参数
+      parameters: NO_ARG_METHODS.has(method)
+        ? []
+        : [{ name: 'payload', wire: 'payload', source: 'json' }],
+      result: { mode: 'strict' },
+    })),
+  }
+}
+
 let remoteNs: any = null
 let mountState: MountState = 'waiting'
 let mountError = ''
@@ -85,7 +117,7 @@ async function doMount(): Promise<void> {
       notifyWaiters()
       return
     }
-    await remote.$mount(REMOTE_NAMESPACE)
+    await remote.$mount(buildContribution())
     // 命名空间由 ctx.inject 回调交付 —— 那边才是它真正出现的时刻
   } catch (err: any) {
     mountState = 'failed'
@@ -178,6 +210,24 @@ const ENDPOINTS: Record<string, string> = {
   'refimage/save': 'refimageSave',
   'refimage/delete': 'refimageDelete',
 }
+
+/** 包名 —— contribution 的 package 字段，也是 cordis entry 的 id */
+const PLUGIN_NAME = 'designer-desk'
+
+/**
+ * 控制器注册的 cordis 服务键 —— descriptor 的 `service` 字段。
+ *
+ * 必须与 src/api.ts 里 `super(ctx, CONTROLLER_KEY, ...)` 的第一个参数一致，
+ * 且**不等于命名空间**（否则控制器会覆盖业务插件的同名服务）。
+ */
+const CONTROLLER_SERVICE_KEY = 'designerDeskController'
+
+/**
+ * 无参数端点 —— descriptor 的 `parameters` 给空数组。
+ * 其余端点走 POST，带一个 json payload。
+ * 与 ENDPOINTS 表的 GET 端点保持一致。
+ */
+const NO_ARG_METHODS = new Set(['health', 'state', 'stages', 'today', 'tasks', 'export', 'comfy/status', 'render-dir'])
 
 export interface ApiInit {
   method?: 'GET' | 'POST'
