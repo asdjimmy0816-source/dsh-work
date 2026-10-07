@@ -9,7 +9,9 @@
  * 真实的「路由能不能被调用」由 scripts/smoke.mjs 用假 ctx 实跑验证，比字符串匹配更强。
  */
 import { readFile, stat } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -199,6 +201,35 @@ check('package.json: 导出 ./api（控制器的独立入口）', () => {
   const files = pkg.files ?? []
   assert(files.includes('lib/api.js'), 'files 缺少 lib/api.js —— 发布后控制器不存在')
   return 'lib/api.js'
+})
+
+check('lib/client.js: module.exports 真的导出 inject 声明', () => {
+  // ⚠️ 真实契约：`window.__ModuleLoader__.load({ id, factory })`，
+  // 宿主按 `factory(require) → exports` 调用，取返回值当 module.exports。
+  // 所以必须**实际执行** bundle 看导出，不能 grep 源码判断
+  // —— esbuild 会把导出收进 `__export(index_exports, {...})`，
+  // grep `exports.inject` 是匹配不到的（踩过这个坑，误判成被 tree-shake）。
+  const src = readFileSync(path.join(root, 'lib/client.js'), 'utf8')
+  let captured = null
+  const jsxStub = { jsx: () => null, jsxs: () => null, Fragment: 'F' }
+  const reactStub = {
+    useState: () => [null, () => {}], useEffect: () => {}, useMemo: () => null,
+    useCallback: (f) => f, useRef: () => ({ current: null }),
+    createElement: () => null, memo: (c) => c,
+  }
+  const sb = { window: { __ModuleLoader__: { load: (o) => { captured = o } } }, console }
+  vm.createContext(sb)
+  vm.runInContext(src, sb)
+  if (!captured) throw new Error('bundle 未调用 window.__ModuleLoader__.load()')
+  const exports = captured.factory((id) =>
+    id === 'react/jsx-runtime' ? jsxStub : id === 'react' ? reactStub : {})
+  if (typeof exports.apply !== 'function') throw new Error('module.exports.apply 不是函数 —— apply() 不会被调用')
+  assert(Array.isArray(exports.inject), 'module.exports.inject 不是数组')
+  assert(exports.inject.includes('slots'),
+    `inject 缺 'slots'：${JSON.stringify(exports.inject)}`)
+  assert(exports.inject.includes('remote'),
+    `inject 缺 'remote'：${JSON.stringify(exports.inject)} —— 读 ctx.remote 会抛 without inject`)
+  return exports.inject.join(',')
 })
 
 check('package.json: client.inject 含 api-gateway（remote 服务的提供方）', () => {

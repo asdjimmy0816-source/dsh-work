@@ -105,6 +105,10 @@ async function main() {
     legalComments: 'none',
     external: REACT_EXTERNAL,
     define: { 'process.env.NODE_ENV': '"production"' },
+    // treeShaking 保持开启。实测 esbuild 会把 inject 收进
+    // `__export(index_exports, { apply, inject })` 并写进 module.exports，
+    // 导出链完整（用 ModuleLoader 的 `factory(require) → exports` 契约验证过）。
+    // 曾误判它被摇掉，那是 grep 模式没匹配上，实际没摇。
     banner: { js: MODULE_LOADER_HEAD },
     footer: { js: MODULE_LOADER_TAIL },
     logLevel: 'warning',

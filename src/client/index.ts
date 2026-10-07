@@ -38,7 +38,30 @@ import { DeskIcon } from './DeskIcon'
 
 type Ctx = any
 
-export const inject = ['slots']
+/**
+ * ⚠️这里是**运行时服务键名**，不是包名 —— 与 package.json 的
+ * `dsh.client.inject`（那个是包名，决定宿主加载哪些 bundle）是**两回事**。
+ *
+ * cordis 的 Proxy 拦截未声明的服务访问：不在这里列出，读 `ctx.remote`
+ * 会抛 `cannot get property "remote" without inject`。
+ *
+ * 实测（cordis 0.1.5-rc.3）：`inject: ['remote']` + 根上 `provide('remote', svc)`
+ * → 能读到；换成包名则读不到。
+ *
+ * 词表参照官方 multi-agent 插件的 client bundle：`['slots','locale','remote']`。
+ *
+ * ⚠️ esbuild 会把没人引用的 `export const` 当副作用摇掉 ——
+ * 这个数组必须在 bundle 里真实存在（`exports.inject=`），否则声明无效。
+ * scripts/gates/run.mjs 有对应门禁守着。
+ */
+export const inject = ['slots', 'remote']
+
+/**
+ * esbuild 会把「没人引用的纯常量导出」当副作用摇掉（`exports.inject` 会消失）。
+ * 挂到 apply 上作为静态属性就摇不掉 —— esbuild 不会动对象属性赋值。
+ * cordis 读的正是 `module.exports.inject`，两者等价。
+ */
+;(apply as any).inject = inject
 
 export function apply(ctx: Ctx) {
   bindCtx(ctx)
