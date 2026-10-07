@@ -5,7 +5,7 @@
  * 各视图之间绝不互相调用渲染函数，一律由本组件按固定顺序分发 props。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Btn, C, FONT, Icon, Pill, R, api, bytesText, cardStyle, inputStyle, useIsNarrow } from './kit'
+import { Btn, C, FONT, Icon, Pill, R, api, bytesText, cardStyle, inputStyle, remoteStatus, useIsNarrow } from './kit'
 import { Today } from './Today'
 import { Projects } from './Projects'
 import { Renders } from './Renders'
@@ -49,6 +49,8 @@ export function App() {
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
   const [showMore, setShowMore] = useState(false)
+  /** Remote 挂载失败的原因；空串表示链路正常 */
+  const [linkError, setLinkError] = useState('')
 
   const jobsRef = useRef<any[]>([])
   const lastPollRef = useRef<number>(Date.now())
@@ -74,8 +76,13 @@ export function App() {
           setState(res)
           jobsRef.current = res.jobs ?? []
         }
+        // 数据通道通了就把之前的挂载错误清掉
+        setLinkError('')
       } catch (e: any) {
-        if (!silent) flash('err', `读取失败：${e?.message ?? e}`)
+        const msg = String(e?.message ?? e)
+        // 挂载失败要显示成明确的空态，而不是「正在读取数据…」永远转圈
+        setLinkError(msg)
+        if (!silent) flash('err', `读取失败：${msg}`)
       } finally {
         if (!silent) setBusy((b) => (b === 'refresh' ? '' : b))
       }
@@ -270,6 +277,7 @@ export function App() {
   const stor = state?.storage
   const running = (state?.jobs ?? []).filter((j) => j.status === 'queued' || j.status === 'running').length
   const conn = state?.comfy
+  const link = remoteStatus()
 
   return (
     <div
@@ -297,9 +305,13 @@ export function App() {
           </span>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginLeft: 'auto', flexWrap: 'wrap' }}>
-            {/* 同步状态指示器（本地方案：本地存储 + 滚动备份） */}
+            {/* 数据通道状态（Typert Remote 是否挂上）+ 存储状态 */}
             <span
-              title={`数据目录 ${stor?.home ?? ''}${stor?.lastBackup ? ` · 上次备份 ${stor.lastBackup.slice(0, 19).replace('T', ' ')}` : ''}`}
+              title={
+                link.state === 'ready'
+                  ? `Remote 命名空间 designerDesk 已挂载 · 数据目录 ${stor?.home ?? ''}`
+                  : `数据通道：${link.state}${link.error ? ` · ${link.error}` : ''}`
+              }
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -308,12 +320,12 @@ export function App() {
                 fontWeight: 600,
                 padding: '3px 9px',
                 borderRadius: R.pill,
-                background: C.okSoft,
-                color: C.ok,
+                background: link.state === 'ready' ? C.okSoft : C.dangerSoft,
+                color: link.state === 'ready' ? C.ok : C.danger,
               }}
             >
-              <Icon name="sync" size={11} color={C.ok} />
-              本地存储 {stor ? bytesText(stor.bytes) : ''}
+              <Icon name={link.state === 'ready' ? 'sync' : 'warn'} size={11} color={link.state === 'ready' ? C.ok : C.danger} />
+              {link.state === 'ready' ? `本地存储 ${stor ? bytesText(stor.bytes) : ''}` : '数据通道未就绪'}
             </span>
 
             <Btn onClick={onExport} disabled={busy === 'export'} title="导出 JSON 备份">
@@ -386,9 +398,33 @@ export function App() {
       {/* ---------------- 内容 ---------------- */}
       <div style={{ padding: narrow ? '14px 14px' : '18px 24px', maxWidth: 1240, margin: '0 auto' }}>
         {!state ? (
-          <div style={{ ...cardStyle, textAlign: 'center', color: C.ink2, fontSize: 13, padding: '40px 20px' }}>
-            正在读取数据…
-          </div>
+          linkError ? (
+            <div style={{ ...cardStyle, borderColor: '#E6BCB2', background: C.dangerSoft, padding: '26px 22px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <Icon name="warn" size={17} color={C.danger} />
+                <span style={{ fontSize: 15, fontWeight: 700, color: C.danger }}>数据通道不可用</span>
+              </div>
+              <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.8, marginBottom: 12 }}>
+                {linkError}
+                <br />
+                这一步失败通常意味着 Remote 命名空间没挂上 —— 控制器
+                <code style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 11.5 }}>
+                  {' '}
+                  designer-desk/api
+                </code>{' '}
+                没有在根层注册。请确认 cordis.patch.yml 里有第二条 entry，且 package.json 导出了
+                <code style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 11.5 }}> ./api</code>。
+              </div>
+              <Btn onClick={() => void refreshAll()}>
+                <Icon name="refresh" size={12.5} color={C.ink2} />
+                重试
+              </Btn>
+            </div>
+          ) : (
+            <div style={{ ...cardStyle, textAlign: 'center', color: C.ink2, fontSize: 13, padding: '40px 20px' }}>
+              正在连接数据通道…
+            </div>
+          )
         ) : null}
 
         {state && tab === 'today' ? (

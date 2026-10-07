@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 .npm/
 .tmp/
+
+# 本地类型链接（指向 dsh 安装目录，仅供 typecheck 用，不应进仓库）
+node_modules/@deepseek-ai/

@@ -1,7 +1,7 @@
 /**
  * designer-desk · client 工具箱
  *
- * 只放三样东西：① 与 Node half 通信的 api；② 内联主题 token；③ 通用 UI 原语与 hook。
+ * 只放三样东西：① 与 Node half 的 Remote 通信；② 内联主题 token；③ 通用 UI 原语与 hook。
  * 这里不放任何业务逻辑 —— 业务在 App / 各视图里。
  *
  * 注意：工作台渲染在 DSH Web 内部，宿主 CSS 可能覆盖 class，
@@ -11,24 +11,173 @@ import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 
 /* ------------------------------------------------------------------ *
- * 与 Node half 通信
+ * 与 Node half 通信（Typert Remote）
  * ------------------------------------------------------------------ */
+
+/**
+ * DSH rc.3 的通信层是 Typert Remote + WebSocket RPC，**没有「HTTP 路由」**。
+ *
+ * 流程（参照官方 multi-agent 插件）：
+ *   1. `ctx.remote.$mount(ns)` 请求挂载命名空间，resolve 出dispose
+ *   2. `ctx.inject(['remote.<ns>'], cb)` 拿到真正的命名空间对象
+ *   3. 之后直接 `ns.method(args)`，返回 Promise
+ *
+ * ⚠️ 命名空间必须在**根层**注册（独立 Loader entry），否则 `$mount` 永远
+ * 停在 waiting：界面加载了但没数据，也不报错。
+ */
 
 let ctxRef: any = null
 
 export function bindCtx(ctx: any) {
   ctxRef = ctx
+  installRemoteBridge(ctx)
 }
 
-function safeService(name: string) {
-  try {
-    return ctxRef?.[name]
-  } catch {
-    return undefined
+export const REMOTE_NAMESPACE = 'designerDesk'
+
+/** 挂载状态：waiting / ready / failed / unsupported */
+type MountState = 'waiting' | 'ready' | 'failed' | 'unsupported'
+
+let remoteNs: any = null
+let mountState: MountState = 'waiting'
+let mountError = ''
+const mountWaiters: Array<() => void> = []
+
+function notifyWaiters() {
+  while (mountWaiters.length) {
+    const fn = mountWaiters.pop()
+    try {
+      fn?.()
+    } catch {
+      /* 忽略单个等待者的异常 */
+    }
   }
 }
 
-const BASE = '/designer-desk'
+/**
+ * 挂载 Remote 命名空间。幂等 —— 多次调用只挂一次。
+ * 返回一个 Promise，在命名空间可用时 resolve。
+ */
+function ensureRemoteMounted(): Promise<void> {
+  if (mountState === 'ready') return Promise.resolve()
+  if (mountState === 'failed' || mountState === 'unsupported') {
+    return Promise.reject(new Error(mountError || 'Remote 命名空间不可用'))
+  }
+  return new Promise<void>((resolve, reject) => {
+    mountWaiters.push(() => {
+      if (mountState === 'ready') resolve()
+      else reject(new Error(mountError || 'Remote 命名空间不可用'))
+    })
+    void doMount()
+  })
+}
+
+let mounting = false
+
+async function doMount(): Promise<void> {
+  if (mounting) return
+  mounting = true
+  try {
+    const remote = ctxRef?.remote
+    if (!remote || typeof remote.$mount !== 'function') {
+      mountState = 'unsupported'
+      mountError = '宿主未提供 remote 服务（api-gateway 客户端插件缺失）'
+      notifyWaiters()
+      return
+    }
+    await remote.$mount(REMOTE_NAMESPACE)
+    // 命名空间由 ctx.inject 回调交付 —— 那边才是它真正出现的时刻
+  } catch (err: any) {
+    mountState = 'failed'
+    mountError = String(err?.message ?? err)
+    notifyWaiters()
+  } finally {
+    mounting = false
+  }
+}
+
+function installRemoteBridge(ctx: any) {
+  if (!ctx || typeof ctx.inject !== 'function') return
+  try {
+    ctx.inject([`remote.${REMOTE_NAMESPACE}`], (nsCtx: any) => {
+      const ns = nsCtx?.remote?.[REMOTE_NAMESPACE]
+      if (ns === undefined || ns === null) return
+      remoteNs = ns
+      mountState = 'ready'
+      mountError = ''
+      notifyWaiters()
+    })
+  } catch {
+    /* inject 不可用时保持 waiting，调用方会拿到明确错误而不是静默空白 */
+  }
+}
+
+/** 挂载是否已完成 —— 供 UI 显示「正在连接 / 数据通道不可用」 */
+export function remoteStatus(): { state: MountState; error: string } {
+  return { state: mountState, error: mountError }
+}
+
+/** 供测试用：重置挂载状态 */
+export function __resetRemoteBridge() {
+  remoteNs = null
+  mountState = 'waiting'
+  mountError = ''
+  mountWaiters.length = 0
+  mounting = false
+}
+
+/** 直接注入命名空间 —— 仅测试用 */
+export function __setRemoteForTest(ns: any) {
+  remoteNs = ns
+  mountState = 'ready'
+  notifyWaiters()
+}
+
+/* ------------------------------------------------------------------ *
+ * 端点映射：客户端的路径名 → Remote 方法名
+ * ------------------------------------------------------------------ */
+
+/**
+ * 视图层沿用路径风格的调用习惯（api('/state')），
+ * 这里映射到 Remote 的方法名。想新增端点先加进这张表。
+ *
+ * ⚠️ 同一路径可能对应两个方法（GET / POST 不同语义），用 `'path:verb'` 覆盖。
+ * 例如 `/config` 读用 getConfig、写用 setConfig —— 不写第二条的话，
+ * POST /config 会打到 getConfig 上，静默读到旧配置。
+ */
+const ENDPOINTS: Record<string, string> = {
+  health: 'health',
+  state: 'state',
+  stages: 'stages',
+  config: 'getConfig',
+  'config:POST': 'setConfig',
+  'project/save': 'projectSave',
+  'project/advance': 'projectAdvance',
+  'project/delete': 'projectDelete',
+  'project/wake': 'projectWake',
+  'task/save': 'taskSave',
+  'task/toggle': 'taskToggle',
+  'task/postpone': 'taskPostpone',
+  'task/delete': 'taskDelete',
+  today: 'today',
+  tasks: 'openTasks',
+  export: 'exportData',
+  import: 'importData',
+  'seed/demo': 'seedDemoData',
+  'seed/clear': 'seedClear',
+  'comfy/status': 'comfyStatus',
+  'comfy/render': 'renderSubmit',
+  'comfy/job': 'renderJob',
+  'render/image': 'renderImage',
+  'render/delete': 'renderDelete',
+  'render-dir': 'renderDir',
+  'site/save': 'siteSave',
+  'site/delete': 'siteDelete',
+  'material/save': 'materialSave',
+  'material/delete': 'materialDelete',
+  'refimage/save': 'refimageSave',
+  'refimage/delete': 'refimageDelete',
+}
 
 export interface ApiInit {
   method?: 'GET' | 'POST'
@@ -36,34 +185,31 @@ export interface ApiInit {
 }
 
 /**
- * 请求 Node half。
- * 优先走宿主提供的请求通道；不可用时回落到同源 fetch（两种都指向同一个 webServer）。
+ * 调用 Node half 的 Remote 方法。
+ *
+ * 语义与原来的 HTTP 版一致：返回 `{ ok, ... }`，不抛异常（除挂载失败）。
  */
 export async function api<T = any>(path: string, init?: ApiInit): Promise<T> {
-  const url = path.startsWith('http')
-    ? path
-    : `${BASE}${path.startsWith('/') ? path : `/${path}`}`
-  const method = (init?.method ?? 'GET').toUpperCase()
-  const payload = init?.body === undefined ? undefined : JSON.stringify(init.body)
-  const headers = payload ? { 'content-type': 'application/json' } : undefined
+  const key = String(path).replace(/^\//, '')
+  const isPost = (init?.method ?? 'GET').toUpperCase() === 'POST'
+  // 先找verb 专属映射，再退回通用映射
+  const method = (isPost ? ENDPOINTS[`${key}:POST`] : undefined) ?? ENDPOINTS[key]
+  if (!method) throw new Error(`未注册的端点：${path}${isPost ? '（POST）' : ''}`)
 
-  const ui = safeService('ui')
-  if (ui && typeof ui.request === 'function') {
-    try {
-      const res = await ui.request(url, { method, body: payload, headers })
-      if (res?.json) return (await res.json()) as T
-      if (res && typeof res === 'object') {
-        if ('ok' in res) return res as T
-        if (typeof res.text === 'function') return JSON.parse(await res.text()) as T
-      }
-    } catch {
-      /* 落到 fetch 兜底 */
-    }
-  }
+  await ensureRemoteMounted()
+  if (!remoteNs) throw new Error(mountError || 'Remote 命名空间未就绪')
 
-  const res = await fetch(url, { method, body: payload, headers })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return (await res.json()) as T
+  const fn = remoteNs[method]
+  if (typeof fn !== 'function') throw new Error(`Remote 方法不存在：${method}`)
+
+  // GET 端点无参数；POST 端点把body 当唯一参数传入
+  const args = isPost ? [init?.body ?? {}] : []
+  return (await fn.apply(remoteNs, args)) as T
+}
+
+/** 导出端点名清单给 gates 校验，避免表与控制器漂移 */
+export function endpointNames(): string[] {
+  return Object.keys(ENDPOINTS).sort()
 }
 
 /* ------------------------------------------------------------------ *

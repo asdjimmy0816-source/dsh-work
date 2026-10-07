@@ -61,6 +61,7 @@ const NAME = pkg.name
 const patch = await readFile(path.join(root, 'cordis.patch.yml'), 'utf8')
 const libIndex = await readOptional('lib/index.js')
 const libClient = await readOptional('lib/client.js')
+const libApi = await readOptional('lib/api.js')
 
 /* ------------------------------------------------------------------ *
  * 1. package.json 合同
@@ -89,6 +90,17 @@ check('package.json: dsh.bundle.patch + dsh.client.platform=web', () => {
   assert(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'dsh.bundle.patch 缺失或不等于 ./cordis.patch.yml')
   assert(pkg.dsh?.client?.platform === 'web', 'dsh.client.platform 必须为 web')
   return `${pkg.dsh.bundle.patch} / ${pkg.dsh.client.platform}`
+})
+
+check('package.json: client.inject 用全限定包名（不是短服务名）', () => {
+  const inject = pkg.dsh?.client?.inject ?? []
+  assert(Array.isArray(inject) && inject.length > 0, 'client.inject 为空 —— apply 不会被调用')
+  // 写 ['slots'] 这类短服务名，宿主解析不到 → apply 静默不执行 → 界面永不渲染
+  const short = inject.filter((n) => !String(n).startsWith('@'))
+  assert(short.length === 0, `client.inject 含短服务名 ${short.join(', ')} —— 必须用全限定包名（如 @deepseek-ai/dsh-client-ui-slots）`)
+  assert(inject.includes('@deepseek-ai/dsh-client-ui-slots'),
+    'client.inject 缺 @deepseek-ai/dsh-client-ui-slots —— 拿不到 slots 服务就无法注册界面')
+  return inject.length + ' 个'
 })
 
 check('禁止声明 @deepseek-ai/* 依赖', () => {
@@ -140,14 +152,53 @@ check('lib/index.js: Node half 导出了 inject / apply', () => {
   return 'inject / apply'
 })
 
-check('lib/index.js: 冒烟功能齐备（hello 命令 + 路由前缀 + health）', () => {
+check('lib/index.js: 冒烟功能齐备（hello 命令 + Remote 命名空间）', () => {
   const src = libIndex
-  // 路由路径由 PREFIX 常量拼接，构建后不是单一字面量 —— 分别校验片段，
-  // 真实可调用性由 scripts/smoke.mjs 实跑验证。
-  assert(src.includes('/designer-desk'), '缺少路由前缀 /designer-desk')
-  assert(src.includes('health'), '缺少 health 冒烟路由')
+  // 通信走 Typert Remote，没有 HTTP 路由前缀了 —— 校验命名空间常量与冒烟命令
+  assert(src.includes('designerDesk'), '缺少 Remote 命名空间 designerDesk')
+  assert(src.includes('health'), '缺少 health 冒烟端点')
   assert(src.includes('designer-desk.hello'), '缺少 designer-desk.hello 冒烟命令')
-  return 'designer-desk.hello + /designer-desk/health'
+  assert(!/webServer/.test(src), 'Node half 仍依赖 webServer —— 通信应已改走 Typert Remote')
+  return 'designer-desk.hello + Remote designerDesk'
+})
+
+check('lib/api.js: Remote 控制器已构建且 default 导出', () => {
+  assert(libApi !== null, 'lib/api.js 不存在 —— 请先运行 pnpm run bundle')
+  assert(/export\s*\{[^}]*DeskRemote[^}]*\}/.test(libApi) || /as DeskRemote/.test(libApi),
+    'lib/api.js 未导出 DeskRemote')
+  assert(/default/.test(libApi), 'lib/api.js 缺少 default 导出（Loader 只实例化 default）')
+  return 'DeskRemote + default'
+})
+
+check('lib/api.js: Typert/cordis 保持 external（不能打进包）', () => {
+  const src = libApi
+  assert(src.includes('@deepseek-ai/dsh-typert-protocol'), '未引用 typert-protocol —— 检查 external 配置')
+  const leaks = ['function Remote(', 'TypertRemoteService']
+  const bundled = leaks.filter((k) => {
+    // external 正确时，这些标识符会以 import 形式出现而非本地定义
+    const defined = new RegExp(`(function|class)\\s+${k.replace(/[()]/g, '')}`).test(src)
+    return defined
+  })
+  assert(bundled.length === 0, `typert 运行时被打包进来 → ${bundled.join(', ')}`)
+  return 'external 正常'
+})
+
+check('cordis.patch.yml: 两条 entry（业务 + Remote 控制器）', () => {
+  const entries = [...patch.matchAll(/^\s*-\s*id:\s*(\S+)\s*$/gm)].map((m) => m[1])
+  assert(entries.length >= 2, `patch 只有 ${entries.length} 条 entry —— Remote 控制器必须单列一条`)
+  assert(entries.includes(NAME), `缺少业务 entry ${NAME}`)
+  assert(
+    entries.some((e) => e.startsWith(`${NAME}-`)) || patch.includes(`${NAME}/api`),
+    '缺少指向 <包名>/api 的 entry —— 控制器挂在子fiber 上会导致客户端 $mount 永远 waiting',
+  )
+  return entries.join(' + ')
+})
+
+check('package.json: 导出 ./api（控制器的独立入口）', () => {
+  assert(pkg.exports?.['./api'], 'exports 缺少 "./api" —— Loader 无法加载 Remote 控制器')
+  const files = pkg.files ?? []
+  assert(files.includes('lib/api.js'), 'files 缺少 lib/api.js —— 发布后控制器不存在')
+  return 'lib/api.js'
 })
 
 check('lib/client.js: ModuleLoader id 等于包名', () => {
@@ -166,12 +217,24 @@ check('lib/client.js: React 保持 external 未被重复打包', () => {
   return 'external 正常'
 })
 
-check('lib/client.js: 注册了 workspace / settings / status 三个插槽', () => {
+check('lib/client.js: 注册 rc.3 实际提供的插槽', () => {
   const src = libClient
-  for (const slot of ['workspace', 'settings', 'status']) {
+  // ⚠️ `workspace` 槽位在 rc.3 已被移除 —— 注册进去不报错但界面永不渲染（静默失败）。
+  // 词表来自 dsh-client-ui-* 实际 `slots.inject(...)` 的全量提取。
+  for (const slot of ['conversation.view', 'settings.section']) {
     assert(src.includes(`"${slot}"`) || src.includes(`'${slot}'`), `未注册插槽 ${slot}`)
   }
-  return 'workspace / settings / status'
+  assert(!src.includes('"workspace"') && !src.includes("'workspace'"),
+    '仍在注册已失效的 workspace 槽位 —— 界面会静默不渲染')
+  return 'conversation.view / settings.section'
+})
+
+check('lib/client.js: 插槽经 slots.inject 声明（不是裸 register）', () => {
+  const src = libClient
+  // 直接 slots.register({name}) 会被拒：
+  // `slot "xxx" is not declared (a parent entry's children table must declare it)`
+  assert(src.includes('.inject('), '未用 slots.inject 包裹注册 —— 插槽会被宿主拒绝')
+  return 'inject 包裹'
 })
 
 check('lib/client.js: 未打包出第二份 React hooks 运行时', () => {

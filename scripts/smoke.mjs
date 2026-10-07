@@ -2,15 +2,21 @@
 /**
  * designer-desk · 冒烟自检
  *
- * 用一个假的 ctx 把 lib/index.js 真正跑起来，验证：
- *   ① 插件能被装配、路由能被注册、启动自检不抛异常
+ * 用真实的 cordis Context 把两个 half 真正跑起来，验证：
+ *   ① 插件能被装配、Remote 控制器能挂载、启动自检不抛异常
  *   ② 首次打开会预置示例数据，且四分区里「逾期」不为空（铁律 6）
  *   ③ 命令 / 待办 / 推进 / 出图节点 的核心链路真能跑通
  *   ④ 跨月、跨年的日期边界计算正确（铁律 10）
  *
+ * ⚠️ 通信走 Typert Remote（lib/api.js 的 DeskRemote），**不是 HTTP 路由**。
+ * 测试里保留 `hit('GET', '/designer-desk/xxx')` 这种路径写法只是为了可读性，
+ * `hit()` 内部已经把路径翻译成 Remote 方法名了 —— 与 client/kit.tsx 的
+ * ENDPOINTS 表同源，两边任一漂移都会被下面的「端点不漂移」断言抓住。
+ *
  * 全程写在临时目录里，不碰用户真实的 ~/.designer-desk。
  */
 import { mkdtemp, rm } from 'node:fs/promises'
+import { Context } from '@deepseek-ai/cordis'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -27,79 +33,109 @@ function assert(name, cond, detail = '') {
 }
 
 /* ------------------------------------------------------------------ *
- * 假 ctx
- * ------------------------------------------------------------------ */
+ * 宿主 ctx —— 用真实的 cordis Context，不用手搓的假对象
+ * ------------------------------------------------------------------ *
+ * 为什么必须用真的：cordis 的 Service 构造时会读 `ctx.reflect` /
+ * `ctx[symbols.isolate]`。手搓的假对象缺这些字段，控制器在构造那一刻就抛
+ * `Cannot read properties of undefined (reading 'provide')` ——
+ * 也就是说拿假 ctx 测 Remote 控制器，等于什么都没测。
+ */
 
-const routes = new Map()
 const logs = []
 
-const ctx = {
-  name: 'designer-desk',
-  logger: {
-    info: (m) => logs.push(['info', m]),
-    warn: (m) => logs.push(['warn', m]),
-    error: (m) => logs.push(['error', m]),
-  },
-  effect(cb) {
-    const dispose = cb()
-    ctx.__dispose = dispose
-    return dispose
-  },
-  setInterval() {
-    return 1
-  },
-  setTimeout() {
-    return 2
-  },
-  on() {
-    return () => {}
-  },
-  emit() {},
-  provide(name, value) {
-    ctx.__provided = ctx.__provided ?? {}
-    ctx.__provided[name] = value
-  },
-  command(name) {
-    const chain = {
-      alias() {
-        return chain
-      },
-      option() {
-        return chain
-      },
-      action(fn) {
-        ctx.__commands = ctx.__commands ?? {}
-        ctx.__commands[name] = fn
-        return chain
-      },
-    }
-    return chain
-  },
-  webServer: {
-    register(cb) {
-      cb({
-        get(p, h) {
-          routes.set(`GET ${p}`, h)
-        },
-        post(p, h) {
-          routes.set(`POST ${p}`, h)
-        },
-      })
-      return () => routes.clear()
-    },
-  },
-}
+/*
+ * cordis 的额外服务用 `app.provide()` 注册，业务插件通过 `inject` 声明后拿到。
+ *
+ * ⚠️ 两个必须知道的 cordis 行为（都踩过）：
+ *  1. `app.plugin()` 返回的是**惰性 fiber**，必须 `await` 它才会真正加载；
+ *     未 await 前读 fiber 上的服务全是 undefined。
+ *  2. 业务插件的 `apply(ctx)` 由 cordis 调用，ctx 参数就是注入了服务的 fiber ——
+ *     不要自己造 ctx 对象传进去，cordis 的 Proxy 会拦掉未注册的键。
+ *  3. `on` / `emit` / `provide` / `effect` 是 cordis 自带的，不要重复 provide（会报
+ *     `already declared as accessor`）。
+ */
+const app = new Context({})
+const commands = {}
+
+app.provide('logger', {
+  info: (m) => logs.push(['info', m]),
+  warn: (m) => logs.push(['warn', m]),
+  error: (m) => logs.push(['error', m]),
+})
+app.provide('command', (name) => {
+  const chain = {
+    alias() { return chain },
+    option() { return chain },
+    description() { return chain },
+    action(fn) { commands[name] = fn; return chain },
+  }
+  return chain
+})
+app.provide('setInterval', () => 1)
+app.provide('clearInterval', () => {})
+app.provide('setTimeout', (f) => setTimeout(f, 0))
+app.provide('clearTimeout', (t) => clearTimeout(t))
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-function makeReq(query = {}, body = {}) {
-  return { query, url: '', json: async () => body }
+/**
+ * Remote 宿主：模拟 DSH 在根层实例化 lib/api.js 的 default 导出。
+ *
+ * ⚠️ 必须用**根层 app** 构造，不能用子 fiber：cordis 的 Service 构造会读
+ * `ctx.reflect` / `ctx[symbols.isolate]`，这两个字段只有根 Context 有。
+ * 子 fiber 上直接抛 `Cannot read properties of undefined (reading 'provide')`。
+ * 这与 DSH 的硬约束同源 —— 控制器必须作为独立 Loader entry 在根层挂载
+ * （cordis.patch.yml 第二条 `designer-desk/api`）。
+ */
+const deskApi = await import('../lib/api.js')
+const controller = new deskApi.default(app)
+
+/**
+ * 路径 → Remote 方法名。与 client/kit.tsx 的 ENDPOINTS 表同源。
+ * 保留路径写法是为了让断言读起来跟界面调用一致。
+ */
+const PATH_TO_METHOD = {
+  health: 'health',
+  state: 'state',
+  stages: 'stages',
+  config: 'getConfig',
+  'project/save': 'projectSave',
+  'project/advance': 'projectAdvance',
+  'project/delete': 'projectDelete',
+  'project/wake': 'projectWake',
+  'task/save': 'taskSave',
+  'task/toggle': 'taskToggle',
+  'task/postpone': 'taskPostpone',
+  'task/delete': 'taskDelete',
+  today: 'today',
+  tasks: 'openTasks',
+  export: 'exportData',
+  import: 'importData',
+  'seed/demo': 'seedDemoData',
+  'seed/clear': 'seedClear',
+  'comfy/status': 'comfyStatus',
+  'comfy/render': 'renderSubmit',
+  'comfy/job': 'renderJob',
+  'render/image': 'renderImage',
+  'render/delete': 'renderDelete',
+  'render-dir': 'renderDir',
+  'site/save': 'siteSave',
+  'site/delete': 'siteDelete',
+  'material/save': 'materialSave',
+  'material/delete': 'materialDelete',
+  'refimage/save': 'refimageSave',
+  'refimage/delete': 'refimageDelete',
 }
 
+/** 等价于 client/kit.ts 里的 api()：把路径翻成 Remote 方法再调 */
 async function hit(method, p, query, body) {
-  const h = routes.get(`${method} ${p}`)
-  if (!h) throw new Error(`路由未注册：${method} ${p}`)
-  return await h(makeReq(query, body))
+  const key = String(p).replace(/^\/designer-desk\//, '')
+  const verb = method.toUpperCase()
+  const name = verb === 'POST' && key === 'config' ? 'setConfig' : PATH_TO_METHOD[key]
+  if (!name) throw new Error(`未映射的端点：${verb} ${p}`)
+  const fn = controller[name]
+  if (typeof fn !== 'function') throw new Error(`Remote 方法不存在：${name}`)
+  return verb === 'GET' ? await fn.call(controller) : await fn.call(controller, body ?? {})
 }
 
 /* ------------------------------------------------------------------ *
@@ -110,22 +146,73 @@ console.log(`\ndesigner-desk · 冒烟自检\n临时数据目录 ${tmp}\n${'─'
 
 const mod = await import('../lib/index.js')
 
+// 业务插件 fiber（cordis 在 await 时调它的 apply(ctx)）
+const fiber = app.plugin({ ...mod, inject: mod.inject })
+// 业务插件的 fiber 就是它的 ctx —— cordis 会用这个当 apply(ctx) 的参数
+const ctx = fiber
+// 命令表挂上去，后续断言用 ctx.__commands
+Object.defineProperty(fiber, '__commands', { get: () => commands })
+
+
 assert('导出 inject', Array.isArray(mod.inject), `实际：${JSON.stringify(mod.inject)}`)
-assert('inject 含 webServer', mod.inject.includes('webServer'), JSON.stringify(mod.inject))
+assert('inject 不含 webServer（通信已改走 Remote）', !mod.inject.includes('webServer'), JSON.stringify(mod.inject))
 assert('导出 apply 函数', typeof mod.apply === 'function')
 
-mod.apply(ctx)
+// ---------- Remote 控制器契约（loader 挂载的硬约束）----------
+assert('lib/api.js 有 default 导出（Loader 只实例化 default）', typeof deskApi.default === 'function',
+  `实际：${typeof deskApi.default}`)
+assert('default 导出就是控制器类', deskApi.default.name === 'DeskRemote', deskApi.default.name)
+assert('控制器命名空间是 designerDesk', deskApi.REMOTE_NAMESPACE === 'designerDesk',
+  String(deskApi.REMOTE_NAMESPACE))
+assert('控制器静态 inject 声明 designerDesk 服务',
+  Array.isArray(deskApi.default.inject) && deskApi.default.inject.includes('designerDesk'),
+  JSON.stringify(deskApi.default.inject))
+assert('控制器不声明 remote.*（宿主侧不存在，会自锁）',
+  !deskApi.default.inject.some((k) => String(k).startsWith('remote.')),
+  JSON.stringify(deskApi.default.inject))
+// 回归：serviceKey 必须与命名空间分开。
+// TypertRemoteService 用 serviceKey 注册 cordis 服务；若它等于命名空间，
+// 控制器会覆盖业务插件 provide 的同名服务，`this.ctx.designerDesk` 变成控制器自己。
+assert('控制器 serviceKey 与命名空间分离（否则覆盖业务服务）',
+  deskApi.CONTROLLER_KEY !== deskApi.REMOTE_NAMESPACE,
+  `serviceKey=${deskApi.CONTROLLER_KEY} namespace=${deskApi.REMOTE_NAMESPACE}`)
+
+// 控制器方法齐全 —— 每个 @Remote 都应有同名方法
+const REQUIRED = [
+  'health', 'state', 'stages', 'getConfig', 'setConfig',
+  'projectSave', 'projectAdvance', 'projectDelete', 'projectWake',
+  'taskSave', 'taskToggle', 'taskPostpone', 'taskDelete',
+  'today', 'openTasks', 'exportData', 'importData', 'seedDemoData', 'seedClear',
+  'comfyStatus', 'renderSubmit', 'renderJob', 'renderImage', 'renderDelete', 'renderDir',
+  'siteSave', 'siteDelete', 'materialSave', 'materialDelete',
+  'refimageSave', 'refimageDelete',
+]
+const missingMethods = REQUIRED.filter((m) => typeof controller[m] !== 'function')
+assert(`控制器具备全部 ${REQUIRED.length} 个 Remote 方法`, missingMethods.length === 0,
+  `缺：${missingMethods.join(', ')}`)
+
+// 第 2 期六个方法必须真的存在（M4/M5/M6 前端已接）
+for (const m of ['siteSave', 'siteDelete', 'materialSave', 'materialDelete', 'refimageSave', 'refimageDelete']) {
+  assert(`第 2 期 Remote 方法已就绪 ${m}`, typeof controller[m] === 'function')
+}
+
+// cordis 会在 fiber 就绪时自己调 apply(ctx) —— 这里只需等它跑完
+await fiber
 await sleep(300) // 等启动自检（ensureDirs + 首次 seeding）跑完
 
-// ---------- 路由注册 ----------
-assert('健康路由已注册', routes.has('GET /designer-desk/health'))
-assert('状态路由已注册', routes.has('GET /designer-desk/state'))
-assert('出图提交路由已注册', routes.has('POST /designer-desk/comfy/render'))
-assert('导入恢复路由已注册', routes.has('POST /designer-desk/import'))
+// ---------- 端点映射表与控制器方法不漂移 ----------
+{
+  const { readFile } = await import('node:fs/promises')
+  const kitSrc = await readFile(new URL('../src/client/kit.tsx', import.meta.url), 'utf8')
+  const tbl = kitSrc.slice(kitSrc.indexOf('const ENDPOINTS'), kitSrc.indexOf('export interface ApiInit'))
+  const mapped = [...tbl.matchAll(/:\s*'([A-Za-z]+)'/g)].map((m) => m[1])
+  const drift = mapped.filter((m) => !REQUIRED.includes(m))
+  assert(`客户端映射表（${mapped.length} 条）全部指向真实 Remote 方法`, drift.length === 0,
+    `漂移：${drift.join(', ')}`)
 
-// ---------- 第 2 期六条路由必须真的注册（M4/M5/M6 前端已接） ----------
-for (const p of ['/designer-desk/site/save', '/designer-desk/site/delete', '/designer-desk/material/save', '/designer-desk/material/delete', '/designer-desk/refimage/save', '/designer-desk/refimage/delete']) {
-  assert(`第 2 期路由已注册 ${p}`, routes.has(`POST ${p}`))
+  // 反向：本测试的 PATH_TO_METHOD 也不能指向不存在的方法
+  const badMap = Object.entries(PATH_TO_METHOD).filter(([, m]) => !REQUIRED.includes(m))
+  assert('测试的路径→方法映射无悬空条目', badMap.length === 0, JSON.stringify(badMap))
 }
 
 // ---------- 冒烟：health ----------
@@ -287,11 +374,16 @@ assert('空数据下 /today 正常', todayEmpty?.ok === true)
 const cmdToday = await ctx.__commands['designer-desk.today']({ options: {} })
 assert('空数据下今日命令有可读输出', typeof cmdToday === 'string' && cmdToday.includes('今日待处理'), String(cmdToday).slice(0, 80))
 
-// ---------- 服务 provide ----------
-assert('已 provide designerDesk 服务', Boolean(ctx.__provided?.designerDesk))
-if (ctx.__provided?.designerDesk) {
-  const svcState = await ctx.__provided.designerDesk.getState()
+// ---------- 服务 provide（cordis 用 app.provide，服务注册在根上）----------
+assert('业务插件已 provide designerDesk 服务', Boolean(app.designerDesk),
+  `根上可见的服务：${Object.keys(app).filter((k) => typeof app[k] !== 'function').slice(0, 8).join(', ')}`)
+if (app.designerDesk) {
+  const svcState = await app.designerDesk.getState()
   assert('provide 的服务可调用', Array.isArray(svcState.projects))
+  assert('服务能读到项目视图', svcState.projects.length >= 3, `项目 ${svcState.projects?.length}`)
+  // 控制器正是通过 static inject=['designerDesk'] 拿到这个服务的
+  assert('控制器能通过 inject 拿到该服务', Boolean(controller.ctx?.designerDesk),
+    '控制器 ctx 上读不到 designerDesk —— static inject 可能没生效')
 }
 
 // ---------- 日期边界（铁律 10 第 5 条）：跨月 / 跨年 —— 测真实实现，不是复制品 ----------
@@ -364,15 +456,40 @@ assert('第 9 阶段没有下一步（结项收尾）', stageDef(9).next === nul
   assert('client 导出 apply 函数', typeof clientExports?.apply === 'function')
 
   // 正常路径：注册三个插槽
+  // ⚠️ 假slots 必须同时提供 inject() 与 register() ——
+  // 真实宿主里必须用 slots.inject(name, () => register(...)) 声明插槽，
+  // 直接 register 会被拒：`slot "xxx" is not declared`。
   const registered = []
+  const injected = []
+  const makeSlots = () => ({
+    inject: (name, cb) => {
+      injected.push(name)
+      const dispose = cb()
+      return typeof dispose === 'function' ? dispose : () => {}
+    },
+    register: (def) => {
+      registered.push(def.name)
+      return () => {}
+    },
+  })
   clientExports.apply({
     name: 'designer-desk',
     logger: { warn: () => {}, error: () => {}, info: () => {} },
-    slots: { register: (def) => registered.push(def.name) },
+    slots: makeSlots(),
   })
-  assert('注册了 3 个插槽', registered.length === 3, JSON.stringify(registered))
-  assert('插槽名为 workspace / settings / status',
-    ['workspace', 'settings', 'status'].every((n) => registered.includes(n)), JSON.stringify(registered))
+  assert('插槽都经由 slots.inject 声明（不是裸 register）',
+    injected.length === registered.length && injected.every((n) => registered.includes(n)),
+    `inject=${injected.join(',')} register=${registered.join(',')}`)
+  assert('注册了 2 个插槽', registered.length === 2, JSON.stringify(registered))
+  // ⚠️ 插槽名必须与宿主 rc.3 实际消费的一致。旧文档里的 `workspace` 已被移除 ——
+  // 注册进去 bundle 能加载、apply 能跑、无报错，但界面永远不渲染（静默失败，最难查）。
+  assert('插槽名是 rc.3 实际提供的两个',
+    registered.join(',') === 'conversation.view,settings.section',
+    registered.join(','))
+  assert('不注册会抛 React #130 的 sidebar.footer.action', !registered.includes('sidebar.footer.action'),
+    `仍注册了：${registered.filter((x) => x === 'sidebar.footer.action').join(',')}`)
+  assert('不再注册已失效的 workspace 槽位', !registered.includes('workspace'),
+    `仍注册了：${registered.filter((r) => r === 'workspace').join(',')}`)
 
   // 降级路径：宿主没有 slots 服务时不能抛异常
   let degradedOk = true

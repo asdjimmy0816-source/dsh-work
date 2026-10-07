@@ -1,13 +1,23 @@
 {
   "name": "designer-desk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "设计台 · 室内设计师个人工作台：项目管线 + 今日作战台 + 效果图工坊（ComfyUI）",
-  "keywords": ["dsh-plugin", "designer", "workspace", "comfyui", "interior-design"],
+  "keywords": [
+    "dsh-plugin",
+    "designer",
+    "workspace",
+    "comfyui",
+    "interior-design"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./api": {
+      "types": "./lib/api.d.ts",
+      "default": "./lib/api.js"
+    },
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
@@ -17,11 +27,20 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "files": [
     "lib/index.js",
+    "lib/api.js",
+    "lib/api.d.ts",
     "lib/client.js",
     "cordis.patch.yml",
     "README.md"

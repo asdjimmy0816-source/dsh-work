@@ -1,3 +1,20 @@
+# designer-desk 的 Loader patch 层。
+#
+# ⚠️ 两条 entry，缺一不可（这是 DSH 的硬约束，不是风格选择）：
+#
+#  1. `designer-desk`       —— 业务插件：provide `designerDesk` 服务、装配命令与定时任务
+#  2. `designer-desk/api`  —— Remote 控制器：default 导出 DeskRemote
+#
+# 为什么控制器必须单列一条：Loader 在**根层**实例化每条 entry 的 default 导出。
+# 如果在业务插件的 apply() 里 `ctx.plugin(DeskRemote)`，控制器会落在业务插件的
+# **子 fiber** 上，服务注册不上 —— 客户端 `ctx.remote.$mount()` 会永远停在
+# `waiting`：界面加载了但永远没数据，也不报错。这条坑 DSH 官方的 multi-agent
+# 插件踩过并写进了注释（见其 cordis.patch.yml 第二条 entry 的说明）。
+#
+# 两条 entry 的 id 必须等于包名 designer-desk（gates 会校验第一条）。
 - insert:
     - id: designer-desk
       name: designer-desk
+
+    - id: designer-desk-api
+      name: designer-desk/api

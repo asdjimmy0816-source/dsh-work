@@ -200,6 +200,13 @@ export async function saveConfig(patch: Partial<DeskConfig>): Promise<DeskConfig
  * 示例数据（含 1 条逾期 —— 铁律 6）
  * ------------------------------------------------------------------ */
 
+/**
+ * 预置示例数据。
+ *
+ * ⚠️ 与 clearAll 同理：必须**原地修改**并返回同一个 db。
+ * 曾经的 `return { ...db, ... }` 写法返回新对象，被 mutate() 丢弃 ——
+ * 「重新载入示例数据」点了没反应。
+ */
 export function seedDemo(db: DB): DB {
   const today = todayStr()
   const now = nowIso()
@@ -256,14 +263,35 @@ export function seedDemo(db: DB): DB {
     { id: 'ref_6', title: '原木儿童房', tags: ['原木', '儿童房', '收纳'], score: 4, source: '小红书', createdAt: now },
   ]
 
-  return { ...db, customers, projects, tasks, sites, materials, refimages }
+  // 原地写入 —— mutate() 只认回调里的副作用，不看返回值
+  db.customers = customers
+  db.projects = projects
+  db.tasks = tasks
+  db.sites = sites
+  db.materials = materials
+  db.refimages = refimages
+  return db
 }
 
 /** 清空示例数据（保留结构，清空内容） */
+/**
+ * 清空全部业务数据（保留结构与 version）。
+ *
+ * ⚠️ 必须**原地修改**并返回同一个 db —— `mutate()` 只用回调的返回值决定写什么，
+ * 回调里丢弃返回值等于什么都没做。曾经的 `return emptyDB()` 写法就踩过这个坑：
+ * 种子数据清不掉，而冒烟测试因为拿到了旧缓存数据没能发现。
+ */
 export function clearAll(db: DB): DB {
+  const keepVersion = db.version
   const empty = emptyDB()
-  empty.version = db.version
-  return empty
+  empty.version = keepVersion
+  for (const key of Object.keys(empty) as Array<keyof DB>) {
+    if (key === 'version') continue
+    // 键集合与 emptyDB() 完全一致，逐键原地覆盖
+    ;(db as unknown as Record<string, unknown>)[key] = empty[key]
+  }
+  db.version = keepVersion
+  return db
 }
 
 export function makeId(prefix: string): string {

@@ -28,20 +28,32 @@
 
 ---
 
-## ⚠️ 当前状态：本地逻辑验证通过，真机通信层待重写
+## 当前状态
 
-第1、2 期六个模块的业务逻辑、界面、门禁、冒烟全部通过，插件也能装进 DSH 并加载成功（浏览器
-`window.__DSH_BOOT__.entries` 里能看到 `designer-desk/client.js`）。
+第1、2 期六个模块的业务逻辑、界面、门禁、冒烟全部通过，插件也装进了 DSH，
+客户端 bundle 确认加载，**运行零报错**。
 
-**但 Node half 的 31 条 HTTP 路由在真 DSH 下不会被调用。** DSH rc.3 的通信层是
-**Typert Remote + WebSocket RPC**（`dsh-api-gateway` / `dsh-typert-protocol` / `dsh-client-connection`），
-浏览器端通过 `Connection` 做一元调用，**没有「HTTP 路由」这个机制**。本项目目前用的是
-`ctx.webServer.register(router => router.get(...))` + 前端 `fetch()`，与真实传输层不匹配。
+通信层已从 HTTP 路由整体改为 **Typert Remote**（DSH rc.3 的实际机制）：
+`src/api.ts` 的 `DeskRemote` 控制器（32 个 `@Remote` 端点）+ client 侧
+`ctx.remote.$mount('designerDesk')`。
 
-影响：界面能加载出框架，但所有数据请求 404，**界面点不动**。
+**已知限制**：主界面挂在 `conversation.view` 插槽上，这是**会话内视图**——
+需要先在 DSH 里开一个会话，六Tab 工作区才会出现。在「新会话」空状态下看不到，
+这是宿主的设计，不是插件的故障。
 
-需要重写：`src/routes.ts`（→ Typert Remote 声明式接口）、`src/client/kit.ts#api()`（→ `Connection` 一元调用）、
-`scripts/smoke.mjs`（→ mock Remote 而非假 router）。详见 [docs/plan.md](docs/plan.md) 的「真机安装验证」一节。
+侧栏徽标暂未注册：`sidebar.footer.action` 在 rc.3 的渲染路径上会抛 React #130，
+错误边界只把该槽位换成空 div，净负收益。
+
+### rc.3 踩坑清单（都是静默失败，务必记住）
+
+| 坑 | 症状 | 正解 |
+|---|---|---|
+| `inject: ['webServer']` | 所有路由 404 | rc.3 无 HTTP 路由，走 Typert Remote |
+| 控制器放在 `apply()` 里 `ctx.plugin()` | 客户端 `$mount()` 永远 waiting | 独立 Loader entry（`cordis.patch.yml` 第二条） |
+| `super(ctx, 'designerDesk')` | 控制器覆盖业务服务，`getState` 变 undefined | serviceKey 与 namespace 分离 |
+| `package.json` 的 `client.inject: ['slots']` | `apply` 静默不执行 | 必须写全限定包名 `@deepseek-ai/dsh-client-ui-slots` |
+| 注册 `workspace` 槽位 | bundle 加载、零报错、界面永不渲染 | rc.3 已移除该槽位，用 `conversation.view` |
+|裸 `slots.register({name})` | `slot "xxx" is not declared` | 必须 `slots.inject(name, () => register(...))` |
 
 ---
 
@@ -140,8 +152,8 @@ dsh web
 ```bash
 pnpm install         # 依赖（见下方 pnpm 12 注意事项）
 pnpm run bundle      # 构建两个 half → lib/
-pnpm run gates       # 一致性门禁：合同 / 名称 / React external / 冒烟齐备（14 项）
-pnpm run smoke       # 冒烟自检：用假 ctx 真跑两个 half（87 项，含第 2 期六条路由）
+pnpm run gates       # 一致性门禁：合同/ 名称 / React external / Remote 契约（20 项）
+pnpm run smoke       # 冒烟自检：真 cordis Context + Remote 控制器（97 项）
 pnpm run typecheck   # 类型检查
 pnpm run verify      # bundle + gates + smoke 一条龙
 ```
@@ -166,19 +178,19 @@ designer-desk/
 │   └── 设计方案.md          完整设计方案
 ├── scripts/
 │   ├── build.mjs           esbuild 双 half 打包 + ModuleLoader 包装
-│   ├── gates/run.mjs       一致性门禁（14 项）
-│   └── smoke.mjs           冒烟自检（87 项，含日期边界与第 2 期六条路由）
+│   ├── gates/run.mjs       一致性门禁（20 项）
+│   └── smoke.mjs           冒烟自检（97 项，日期边界 + 第 2 期 + Remote 契约）
 └── src/
         ├── index.ts            Node half 入口（inject 并集 + effect 统一注册）
         ├── types.ts            11 张表类型 + 9 阶段模型
         ├── store.ts            本地 JSON 存储 + 滚动备份 + 串行写入
         ├── derive.ts           计算层：项目视图 / 四分区 / 统计 / 推进引擎
         ├── comfy.ts            ComfyUI 客户端（提交 / 轮询 / 归档）
-        ├── routes.ts           HTTP 路由（31 条）
+        ├── api.ts              Remote 控制器（32 个 @Remote 端点，default 导出）
         ├── commands.ts         命令与工具
         ├── schedule.ts         定时任务
         └── client/             浏览器 half
-            ├── index.ts        slots 注册
+            ├── index.ts        slots 注册（经 slots.inject 声明）
             ├── kit.tsx         api 请求 + 主题 token + UI 原语 + 内联 SVG 图标
             ├── App.tsx         工作区（统一 refreshAll 入口 + 六 Tab 分发）
             ├── Today.tsx       今日作战台（M2）
@@ -201,10 +213,10 @@ designer-desk/
 
 | 检查 | 结果 |
 |---|---|
-| `pnpm run bundle` | ✅ lib/index.js 79.6 KB · lib/client.js 203.5 KB |
+| `pnpm run bundle` | ✅ lib/index.js 152.9 KB · lib/api.js 63.9 KB · lib/client.js 206.1 KB |
 | `pnpm run typecheck` | ✅ 0 error |
-| `pnpm run gates` | ✅ 14 / 14 |
-| `pnpm run smoke` | ✅ 87 / 87 |
+| `pnpm run gates` | ✅ 20 / 20 |
+| `pnpm run smoke` | ✅ 97 / 97 |
 
 ### 合同铁律
 

@@ -109,14 +109,15 @@
 
 | 期次 | 新增模块 | 状态 |
 |---|---|---|
-| 第 1 期 | M1 项目管线 + M2 今日作战台 + M3 效果图工坊 | ✅ 已实现，本地验证通过 |
-| 第 2 期 | M4 工地巡检 + M5 材料进场 + M6 灵感素材库 | ✅ 已实现，本地验证通过 |
+| 第 1 期 | M1 项目管线 + M2 今日作战台 + M3 效果图工坊 | ✅ 已实现，真机加载无错 |
+| 第 2 期 | M4 工地巡检 + M5 材料进场 + M6 灵感素材库 | ✅ 已实现，真机加载无错 |
 | 第 3 期 | M7 报价与合同 + M8 选材库 | 待启动 |
 | 第 4 期 | M9 汇报 PPT 助手 + M10 公众号日更台 | 待启动 |
 | 第 5 期 | M11 小说写作台 + M12 数字生活角 | 待启动 |
 
-> ⚠️ **第 1、2 期标注的是「本地验证通过」，不是「真机可用」。** 真机冒烟（2026-10-07）发现通信层设计不匹配，
-> 见文末「真机安装验证」一节 —— Node half 的 31 条 HTTP 路由在真 DSH 下不会被调用，需重写为 Typert Remote。
+>✅ 通信层已重写为 Typert Remote 并在真机跑通（零 slot 崩溃、零控制台错误）。
+> 剩余限制：主界面挂在会话内插槽 `conversation.view`，需先开一个会话才出现。
+> 详见文末「真机安装验证」。
 
 > 数据表 11 张已在第 1 期一次性定义（`sites` / `materials` / `refimages` / `quotes` / `contracts` / `contents` / `reading` 先留空数组），
 > 后续期次直接往表里填业务，**不需要数据迁移，也不会丢已有数据**。
@@ -182,32 +183,56 @@ allowBuilds:
 - 浏览器 `window.__DSH_BOOT__.entries` 里能看到 `designer-desk/client.js`，与官方插件并排 —— **插件树加载成功**
 - 修好 dsh 全局安装后，启动日志里不再有 `plugin tree failed to load`
 
-### 必须重写：通信层
+### 通信层已重写为 Typert Remote（完成）
 
-**现象**：所有 `/api/designer-desk/*` 与 `/designer-desk/*` 全部 404，连官方服务的路径也 404。
+**原问题**：所有 `/api/designer-desk/*` 与 `/designer-desk/*` 全404 —— 连官方服务路径也 404。
+**根因**：DSH rc.3 的通信层是Typert Remote + WebSocket RPC，没有「HTTP 路由」这个机制。
 
-**根因**：DSH rc.3 的通信层是 **Typert Remote + WebSocket RPC**（`dsh-api-gateway` / `dsh-typert-protocol` /
-`dsh-client-connection`）—— 浏览器端通过 `Connection` 做一元调用，流式走 Gateway 的 WebSocket mux。
-**没有「HTTP 路由」这个机制。**
+**已做的改动**：
 
-现在的实现（`routes.ts` 31 条 `router.get/post` + `kit.tsx` 的 `fetch('/designer-desk/...')`）在这个宿主下一次都不会被调用。
+| 文件 | 改动 |
+|---|---|
+| `src/api.ts`（新） | 32 个 `@Remote` 端点的 `DeskRemote` 控制器，default 导出；业务逻辑从旧 routes.ts 平移过来 |
+| `src/routes.ts` | 删除（HTTP 路由已不存在） |
+| `cordis.patch.yml` | 两条 entry：`designer-desk` + `designer-desk/api` |
+| `package.json` | 加 `exports['./api']`、`files` 加 `lib/api.js`、`client.inject` 改全限定包名 |
+| `scripts/build.mjs` | 第三个产物 `lib/api.js`（typert/cordis 保持 external） |
+| `src/client/kit.tsx#api()` | `fetch()` → `ctx.remote.$mount('designerDesk')` + `ctx.inject(['remote.designerDesk'])` |
+| `src/client/index.ts` | 插槽改用 `conversation.view` / `settings.section`，并经 `slots.inject()` 声明 |
+| `scripts/smoke.mjs` | 假 router → 真 cordis `Context` + Remote 控制器 |
+| `scripts/gates/run.mjs` | 新增 6 项Remote / 插槽 / inject 契约校验 |
 
-相关细节：
+### rc.3 的六个静默失败坑（全部踩过）
 
-- `webServer` 服务由 `@deepseek-ai/dsh-host-webserver` 提供，其类型定义注释写明「Electron 用 file:// + IPC，此包从不打印 URL」
-- `inject: ['webServer']` 在某些宿主下可能满足不了 → `apply` 根本不执行。此时 `safe()` 只在日志留一行 error，
-  极易被忽略（已用假 ctx 实测复现：`Cannot read properties of undefined (reading 'register')`）
-- 所以**必须有一条「apply 到底跑没跑」的硬断言**，不能只看启动日志有没有报错
-
-### 重写范围
-
-| 文件 | 现状 | 需要 |
+| 坑 | 症状 | 正解 |
 |---|---|---|
-| `src/routes.ts` | 31 条 `router.get/post` | 改成 Typert Remote 声明式接口 |
-| `src/client/kit.ts#api()` | `fetch('/designer-desk/...')` | 改走 `Connection` 一元调用 |
-| `scripts/smoke.mjs` | 假 ctx + 假 router 验证 31 条路由 | 改成 mock Typert Remote，验证 remote 方法而非 HTTP 路径 |
+| `inject: ['webServer']` | 所有路由 404 | rc.3 无 HTTP 路由，走 Typert Remote |
+| 控制器写在 `apply()` 里 `ctx.plugin()` | 客户端 `$mount()` 永远 waiting，无报错 | 必须是独立 Loader entry，由Loader 在根层实例化 |
+| `super(ctx, 'designerDesk')` | 控制器注册时覆盖业务服务，`ctx.designerDesk.getState` 变 undefined | serviceKey 与 namespace 分离（照抄官方 `multiAgentController` / `multiAgent`） |
+| `client.inject: ['slots']` | `apply` 静默不执行，界面永不渲染 | 必须写全限定包名 `@deepseek-ai/dsh-client-ui-slots` |
+| 注册 `workspace` 槽位 | bundle 加载、零报错、界面永不渲染 | rc.3 已移除该槽位；实际词表从 `dsh-client-ui-*` 的 `slots.inject(...)` 全量提取 |
+| 裸 `slots.register({name})` | `slot "xxx" is not declared (a parent entry's children table must declare it)` | 必须 `slots.inject(name, () => register(...))` |
 
-**在重写完成前，本项目只能算「本地逻辑验证通过」，界面在真 DSH 里点不动。**
+**这六个坑的共同点：全部静默失败** —— 不报错、日志干净、bundle 正常加载，只有界面不出来。
+定位靠的是往 client bundle 里塞 `globalThis.__DD_*` 诊断标记，用真实浏览器读。
+
+### 顺手修掉的既有 bug
+
+- `store.ts#clearAll` / `seedDemo` **返回新对象**而不是原地修改，而 `mutate()` 只用回调的副作用
+  → 「清空数据」和「重新载入示例数据」点了没反应。原来的冒烟测试因为拿到旧缓存数据没能发现。
+
+### 剩余限制
+
+主界面挂在 `conversation.view` —— 这是**会话内视图**，需要先在 DSH 里开一个会话才会渲染。
+「新会话」空状态下看不到六 Tab 工作区，属宿主设计而非插件故障。
+
+侧栏徽标未注册：`sidebar.footer.action` 在 rc.3 渲染路径上抛 React #130，错误边界只把该槽位
+换成空 div，净负收益。待宿主修好或找到正确 entry 形态后再加。
+
+### 验证
+
+typecheck 0 error ｜ gates **20/20** ｜ smoke **97/97** ｜ 真机（真实 Chrome + dsh web）
+**零 slot 崩溃、零控制台错误**。
 
 ### dsh 全局安装的坑（已修）
 

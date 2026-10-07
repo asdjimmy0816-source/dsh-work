@@ -1,21 +1,29 @@
 /**
- * designer-desk · Node half 入口
+ * designer-desk · Node half 业务插件入口
  *
- * 合并装配以下配方：command-tool + http-api + service-provider + event-task
- * 严格注入：通过 ctx 访问的每一个「服务」都必须列进 inject。
+ * 职责：provide `designerDesk` 服务、装配命令与定时任务。
+ *
+ * ⚠️ 本入口**不注册** Remote 控制器 —— 控制器必须作为独立 Loader entry
+ * （cordis.patch.yml 第二条 `designer-desk/api`）由 Loader 在根层挂载。
+ * 在这里 `ctx.plugin(DeskRemote)` 会让控制器落在子 fiber 上，服务注册不上，
+ * 客户端 `$mount()` 永远停在 waiting。
  */
-import { invalidateComfyCache, registerRoutes } from './routes'
+import { invalidateComfyCache } from './api'
 import { registerCommands, registerTools, renderTodayText } from './commands'
 import { composeDailyBrief, latestBrief, registerSchedule } from './schedule'
 import { DESK_HOME, ensureDirs, loadConfig, loadDB, mutate, replaceDB } from './store'
 import { computeBuckets, toProjectViews } from './derive'
 import { comfyStatus, submitRender } from './comfy'
+import { renderSink } from './api'
 import { todayStr } from './types'
 
 type Ctx = any
 
-/** webServer 是服务，使用前必须注入 */
-export const inject = ['webServer']
+/**
+ * 严格注入：只有业务侧要用的服务。
+ * 注意没有 webServer —— 通信走 Typert Remote（见 src/api.ts）。
+ */
+export const inject: string[] = []
 
 /**
  * 测试出口：把纯函数暴露给 scripts/smoke.mjs 做边界自检。
@@ -55,7 +63,6 @@ export function apply(ctx: Ctx) {
     })()
 
     // ---------- 能力装配 ----------
-    safe('http-api', () => registerRoutes(ctx))
     safe('command-tool', () => registerCommands(ctx))
     safe('tool', () => registerTools(ctx))
     safe('event-task', () => registerSchedule(ctx))
@@ -75,14 +82,14 @@ export function apply(ctx: Ctx) {
 }
 
 /* ------------------------------------------------------------------ *
- * 对外提供服务：其他插件或上层可以直接取用，不必走 HTTP
+ * 对外提供服务：Remote 控制器与命令层都经由这里取数据
  * ------------------------------------------------------------------ */
 
 function provideService(ctx: Ctx): () => void {
   if (typeof ctx.provide !== 'function') return () => {}
 
   const api = {
-    version: '0.1.0',
+    version: '0.2.0',
     home: DESK_HOME,
     todayStr,
 
@@ -112,7 +119,16 @@ function provideService(ctx: Ctx): () => void {
       return comfyStatus(await loadConfig())
     },
 
-    submitRender,
+    async submitRender(req: any) {
+      const cfg = await loadConfig()
+      const db = await loadDB()
+      const prj = req?.projectId ? db.projects.find((p) => p.id === req.projectId) : undefined
+      return submitRender(
+        cfg,
+        { ...req, projectLabel: prj?.name || req?.projectLabel || 'unassigned' },
+        renderSink,
+      )
+    },
 
     async update(mutator: (db: any) => unknown) {
       const out = await mutate(mutator)
